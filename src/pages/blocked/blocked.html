@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Blocked · FocusFlow</title>
+  <link rel="stylesheet" href="../theme.css">
+  <link rel="stylesheet" href="blocked.css">
+</head>
+<body>
+  <aside class="side side-left" aria-label="Study motivation">
+    <div class="mark"></div>
+    <div class="kicker">Your placement season</div>
+    <h2>One focused hour can change your year.</h2>
+    <p class="muted">Phone side mein rakho. Notes kholo. Sirf ek problem se start karo.</p>
+  </aside>
+
+  <main class="card">
+    <div class="shield" aria-hidden="true">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+        <path d="M9 12l2 2 4-4"/>
+      </svg>
+    </div>
+    <span class="chip danger" id="countChip"><span class="dot"></span><span id="countText">Blocked</span></span>
+
+    <h1>Not study time</h1>
+    <p class="what" id="what"></p>
+    <p class="host muted" id="host"></p>
+
+    <div class="why">
+      <span class="chip" id="sourceChip"></span>
+      <span id="reason"></span>
+    </div>
+
+    <blockquote class="roast" id="roast"></blockquote>
+
+    <div class="actions">
+      <a class="btn btn-primary" id="backToWork" href="#">Back to work</a>
+      <button class="btn" id="closeTab" type="button">Close tab</button>
+    </div>
+
+    <form class="yt-search" id="ytSearch" hidden>
+      <label for="ytQuery" class="muted">Search YouTube for a study topic instead</label>
+      <div class="row">
+        <input class="input" id="ytQuery" placeholder="e.g. dynamic programming striver" required>
+        <button class="btn" type="submit">Search</button>
+      </div>
+    </form>
+
+    <details class="appeal" id="appeal" hidden>
+      <summary>This is study content</summary>
+      <p class="muted" id="appealInfo"></p>
+      <form id="appealForm" autocomplete="off">
+        <label class="muted" for="appealInput">Type <b>I am here to study</b> to open this page</label>
+        <div class="row">
+          <input class="input" id="appealInput" disabled>
+          <button class="btn" id="appealSubmit" type="submit" disabled>Wait…</button>
+        </div>
+        <p class="error" id="appealError" role="alert"></p>
+      </form>
+    </details>
+    <p class="muted locked" id="lockedNote" hidden></p>
+  </main>
+
+  <aside class="side side-right" aria-label="Wisdom">
+    <section class="wisdom">
+      <div class="kicker">Bhagavad Gita</div>
+      <p class="shlok" id="shlok"></p>
+      <p class="muted" id="meaning"></p>
+    </section>
+    <section class="wisdom">
+      <div class="kicker">For this moment</div>
+      <p id="motivation"></p>
+    </section>
+  </aside>
+
+  <script type="module" src="blocked.js"></script>
+</body>
+</html>

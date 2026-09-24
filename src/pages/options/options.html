@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FocusFlow Settings</title>
+  <link rel="stylesheet" href="../theme.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <main class="page">
+    <header class="page-head">
+      <img src="../../../icons/icon48.png" alt="" width="40" height="40">
+      <div>
+        <h1>FocusFlow settings</h1>
+        <p class="muted">Strict mode is always on: a page opens only when it is judged to be study or tech content.</p>
+      </div>
+    </header>
+
+    <!-- How it works -->
+    <section class="section how">
+      <ol class="steps">
+        <li><b>Read the page.</b> Title, description, OpenGraph/JSON-LD tags and headings. For YouTube: the video's category, description and tags, fetched from YouTube.</li>
+        <li><b>Look the site up.</b> FocusFlow fetches the site's home page once to learn what the site is about.</li>
+        <li><b>Ask the AI.</b> A thinking model that you run (on your computer, your free Hugging Face Space or any server) decides <i>study</i> or <i>block</i>. Thinking is always on.</li>
+        <li><b>Learn and get faster.</b> Every answer is remembered, videos on screen and the link under your mouse are judged before you click, and the offline model learns from the AI for when it can't be reached. Only pages are blocked, not whole sites, unless a site has shown nothing but distractions.</li>
+      </ol>
+    </section>
+
+    <!-- LLM -->
+    <section class="section" id="llm">
+      <div class="section-head">
+        <h2>Thinking AI</h2>
+        <span class="chip" id="llmState"><span class="dot"></span><span id="llmStateText">…</span></span>
+      </div>
+
+      <div class="presets" role="radiogroup" aria-label="Where the model runs">
+        <button class="preset" type="button" data-preset="ollama">
+          <b>This computer</b><span>Ollama · offline · free</span>
+        </button>
+        <button class="preset" type="button" data-preset="hfSpace">
+          <b>Hugging Face Space</b><span>Your own free Space · unlimited</span>
+        </button>
+        <button class="preset" type="button" data-preset="custom">
+          <b>Your server</b><span>e.g. Oracle Cloud Always Free</span>
+        </button>
+      </div>
+
+      <details class="help" id="helpOllama">
+        <summary>Set up Ollama (2 minutes)</summary>
+        <ol>
+          <li>Install Ollama from <a href="https://ollama.com/download" target="_blank" rel="noopener">ollama.com/download</a>.</li>
+          <li>Download the thinking model: <code>ollama pull qwen3:4b</code> (≈2.5 GB, runs fully on a 4 GB GPU). On Windows, <code>scripts\windows\setup-ollama.cmd</code> does all of this and tunes Ollama for speed.</li>
+          <li>Keep Ollama running. If Test says 403, allow extensions and restart Ollama:
+            <code>OLLAMA_ORIGINS=chrome-extension://*,moz-extension://*</code></li>
+        </ol>
+      </details>
+      <details class="help" id="helpHf">
+        <summary>Set up a free Hugging Face Space</summary>
+        <ol>
+          <li>Create a new <b>Docker</b> Space (free CPU basic) at <a href="https://huggingface.co/new-space" target="_blank" rel="noopener">huggingface.co/new-space</a>.</li>
+          <li>Upload the two files from this repo's <code>hf-space/</code> folder.</li>
+          <li>Optional: add a secret <code>LLAMA_API_KEY</code> and paste the same value as the access token below.</li>
+          <li>Use <code>https://&lt;your-username&gt;-&lt;space-name&gt;.hf.space/v1</code> as the server URL. Free Spaces have 2 CPUs: a new page takes ~10–30 s, which pre-judging mostly hides.</li>
+        </ol>
+      </details>
+      <details class="help" id="helpCustom">
+        <summary>Run it on your own free server (faster than a Space)</summary>
+        <ol>
+          <li>Oracle Cloud's <a href="https://www.oracle.com/cloud/free/" target="_blank" rel="noopener">Always Free</a> tier gives a VM with 4 CPUs and 24 GB RAM, free with no usage limit.</li>
+          <li>On the VM: <code>docker build -t focusflow-llm hf-space &amp;&amp; docker run -d --restart=always -p 7860:7860 -e LLAMA_API_KEY=&lt;secret&gt; focusflow-llm</code></li>
+          <li>Open port 7860 in the VM's firewall, then use <code>http://&lt;vm-ip&gt;:7860/v1</code> and your secret as the access token.</li>
+        </ol>
+      </details>
+
+      <form class="grid-2" id="llmForm" autocomplete="off">
+        <label class="field span-2">
+          <span>Server URL <span class="muted">(OpenAI-compatible, ends in /v1)</span></span>
+          <input class="input" id="baseUrl" type="url" spellcheck="false" required>
+        </label>
+        <label class="field">
+          <span>Model <span class="muted">(auto = best installed)</span></span>
+          <span class="with-button">
+            <input class="input" id="model" list="modelOptions" spellcheck="false" required>
+            <button class="btn" type="button" id="detectModels">Detect</button>
+          </span>
+          <datalist id="modelOptions"></datalist>
+        </label>
+        <label class="field">
+          <span>Access token <span class="muted">(only for a private server)</span></span>
+          <input class="input" id="apiKey" type="password" spellcheck="false" placeholder="optional">
+        </label>
+        <label class="field">
+          <span>Give up after (seconds)</span>
+          <input class="input" id="timeoutSec" type="number" min="5" max="180" required>
+        </label>
+        <p class="field muted note">Thinking is always on. If the server can't be reached, the offline model decides (strict) until it's back.</p>
+        <div class="actions span-2">
+          <button class="btn btn-primary" type="submit">Save</button>
+          <span class="muted" id="llmResult" role="status"></span>
+        </div>
+      </form>
+    </section>
+
+    <!-- Test -->
+    <section class="section" id="test">
+      <div class="section-head"><h2>Test a page</h2></div>
+      <p class="muted">See exactly what FocusFlow reads and what the AI decides, without opening the page. Nothing is learned from tests.</p>
+      <form class="with-button" id="testForm">
+        <input class="input" id="testUrl" type="url" placeholder="https://www.youtube.com/watch?v=…" required>
+        <button class="btn btn-primary" type="submit">Test</button>
+      </form>
+      <div class="test-result" id="testResult" hidden></div>
+    </section>
+
+    <!-- Learned sites -->
+    <section class="section" id="sites">
+      <div class="section-head">
+        <h2>Learned sites</h2>
+        <span class="muted" id="siteCount"></span>
+      </div>
+      <p class="muted">Every page is judged on its own. A <b>whole site</b> is only opened or blocked after 3 of its pages were judged the same way and <b>none</b> the other way. One study page makes a site <b>mixed</b> for good, so on YouTube, Reddit, Medium and the like only the distracting pages are blocked. YouTube is always judged per video.</p>
+      <div class="tabs" role="tablist" id="siteFilter">
+        <button class="tab active" type="button" data-filter="all">All</button>
+        <button class="tab" type="button" data-filter="study">Study</button>
+        <button class="tab" type="button" data-filter="mixed">Mixed</button>
+        <button class="tab" type="button" data-filter="distraction">Distraction</button>
+        <button class="tab" type="button" data-filter="learning">Learning</button>
+      </div>
+      <ul class="list" id="siteList"></ul>
+      <p class="muted empty" id="siteEmpty">Nothing learned yet. Browse normally and FocusFlow will fill this in.</p>
+    </section>
+
+    <!-- Your rules -->
+    <section class="section" id="rules">
+      <div class="section-head"><h2>Your rules</h2></div>
+      <p class="muted">Optional. A rule beats the AI for a whole site or path, e.g. your college portal. A path like <code>reddit.com/r/leetcode</code> beats <code>reddit.com</code>.</p>
+      <form class="add-rule" id="addRuleForm" autocomplete="off">
+        <input class="input" id="newPattern" placeholder="e.g. lms.mycollege.edu" spellcheck="false" required>
+        <select class="select" id="newAction">
+          <option value="block">Always block</option>
+          <option value="allow">Always allow</option>
+        </select>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </form>
+      <ul class="list" id="ruleList"></ul>
+    </section>
+
+    <!-- Marks -->
+    <section class="section" id="marks">
+      <div class="section-head"><h2>Your marks</h2></div>
+      <p class="muted">Pages you marked from the blocked screen or the toolbar. They also teach the offline model.</p>
+      <ul class="list" id="markList"></ul>
+      <p class="muted empty" id="markEmpty">No marks yet.</p>
+    </section>
+
+    <!-- Data -->
+    <section class="section" id="data">
+      <div class="section-head"><h2>Data</h2></div>
+      <p class="muted" id="dataSummary"></p>
+      <div class="actions">
+        <button class="btn" type="button" id="resetLearning">Forget what the AI learned</button>
+        <button class="btn" type="button" id="resetStats">Reset stats</button>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>

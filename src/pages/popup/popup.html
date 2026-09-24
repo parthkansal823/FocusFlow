@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FocusFlow</title>
+  <link rel="stylesheet" href="../theme.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="header">
+    <img src="../../../icons/icon32.png" alt="" class="logo" width="26" height="26">
+    <div class="brand">
+      <span class="brand-name">FocusFlow</span>
+      <span class="brand-sub">Only study &amp; tech opens</span>
+    </div>
+    <span class="chip ok" title="There is no off switch"><span class="dot"></span>Always on</span>
+  </header>
+
+  <section class="card" id="tabCard">
+    <div class="card-head">
+      <span class="row-title">This tab</span>
+      <span class="chip" id="tabChip" hidden></span>
+    </div>
+    <p class="tab-title" id="tabTitle">—</p>
+    <p class="row-sub" id="tabHost"></p>
+    <button class="btn btn-block" id="blockTab" disabled>Block this page</button>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <span class="row-title">Blocked today</span>
+      <span class="row-sub"><span id="totalCount">0</span> all time</span>
+    </div>
+    <div class="today">
+      <span class="today-count" id="todayCount">0</span>
+      <div class="bars" id="weekBars" aria-label="Blocks in the last 7 days"></div>
+    </div>
+    <ol class="recent" id="recentList"></ol>
+  </section>
+
+  <section class="card brain">
+    <div class="card-head">
+      <span class="row-title">Judge</span>
+      <span class="chip" id="llmChip"><span class="dot"></span><span id="llmText">…</span></span>
+    </div>
+    <p class="row-sub" id="learned">—</p>
+  </section>
+
+  <footer class="footer">
+    <span class="row-sub">Metadata + local AI, no fixed lists</span>
+    <button class="btn" id="openSettings">Settings</button>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
