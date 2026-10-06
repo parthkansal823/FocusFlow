@@ -4,26 +4,36 @@
 // controller (metadata -> local LLM -> offline model).
 //
 // Order of precedence:
-//   1. page you marked as a distraction         -> block
-//   2. your own site rules (most specific wins)  -> allow / block
-//   3. page you marked as study content          -> allow
-//   4. learned site, on evidence (never YouTube) -> study: allow, distraction: block
-//   5. everything else                           -> check this page's content
+//   1. hard-mode distraction surfaces            -> block
+//   2. distraction marks and your block rules     -> block
+//   3. old study marks / allow rules              -> ignored
+//   4. AI-reviewed study site (never YouTube)     -> allow without scanning
+//   5. learned site, on evidence (never YouTube) -> study: allow, distraction: block
+//   6. everything else                           -> check this page's content
 
 import { contentKey, findRule, isLocalHost, isWebUrl, isYouTubeHost, normalizeHost, parseUrl, youtubeVideoId } from "./rules.js";
 import { localDateKey } from "./stats.js";
+import { hardBlockReason } from "./hard-mode.js";
+import { LIMITS } from "./defaults.js";
 
 /**
  * @param {string} url
  * @param {{settings: object, overrides: object, sites: object}} ctx
  * @returns {{action: "allow", reason: string}
- *         | {action: "block", reason: "rule"|"marked"|"site", pattern?: string, key?: string, host?: string}
+ *         | {action: "block", reason: "hard"|"rule"|"marked"|"site", detail?: string, pattern?: string, key?: string, host?: string}
  *         | {action: "check", key: string, kind: "youtube"|"page", host: string}}
  */
 export function decide(url, ctx) {
   const parsed = parseUrl(url);
   if (!parsed || !isWebUrl(parsed.href)) return { action: "allow", reason: "not-web" };
   if (isLocalHost(parsed.hostname)) return { action: "allow", reason: "local" };
+  // Leave the browser's own parental-control notice visible. This does not
+  // allow the original website or alter any browser/OS restriction.
+  if (parsed.hostname === "sdx.microsoft.com" && parsed.pathname === "/family/restricted-web") {
+    return { action: "allow", reason: "browser-safety" };
+  }
+  const hardReason = hardBlockReason(parsed);
+  if (hardReason) return { action: "block", reason: "hard", detail: hardReason };
 
   const host = normalizeHost(parsed.hostname);
   const key = contentKey(parsed);
@@ -31,10 +41,7 @@ export function decide(url, ctx) {
   if (mark && mark.verdict === "block") return { action: "block", reason: "marked", key };
 
   const rule = findRule(ctx.settings.rules, parsed);
-  if (rule && rule.action === "allow") return { action: "allow", reason: "rule" };
   if (rule && rule.action === "block") return { action: "block", reason: "rule", pattern: rule.pattern };
-
-  if (mark && mark.verdict === "allow") return { action: "allow", reason: "marked" };
 
   const kind = youtubeVideoId(parsed) ? "youtube" : "page";
   const type = isYouTubeHost(host) ? "mixed" : siteType(ctx.sites && ctx.sites[host]);
@@ -46,13 +53,20 @@ export function decide(url, ctx) {
 // ---------------------------------------------------------------------------
 // Learned sites
 //
-// A whole site is only ever opened or blocked on evidence, never on one guess:
-// it needs SITE_EVIDENCE pages judged the same way, *no* page judged the other
-// way, and the AI must agree about what kind of site it is. One study page on
-// a site (judged by the AI or marked by you) makes it "mixed" for good, so
-// platforms like YouTube, Reddit or Medium are always judged page by page.
+// Dedicated-study trust requires an explicit AI homepage + page review, and
+// expires in 7 days. Legacy study evidence and whole-site distraction blocking
+// require 3 agreeing pages. A conflicting page removes whole-site study trust.
+// YouTube always remains page-by-page, irrespective of stored site reviews.
 
 export const SITE_EVIDENCE = 3;
+
+export function siteReview(record, now = Date.now()) {
+  const review = record?.review;
+  return review?.source === "llm" && review.version === 1 &&
+    ["study", "mixed", "distraction"].includes(review.type) &&
+    Number.isFinite(review.at) && review.at <= now && now - review.at < LIMITS.siteReviewTtlMs
+    ? review : null;
+}
 
 function topVote(votes) {
   let best = "";
@@ -69,9 +83,12 @@ export function siteType(record) {
   const allowed = record.allowed || 0;
   const blocked = record.blocked || 0;
   if (allowed > 0 && blocked > 0) return "mixed";
+  const review = siteReview(record);
+  if (review?.type === "study" && allowed > 0 && blocked === 0) return "study";
+  if (review?.type === "mixed") return "mixed";
   const vote = topVote(record.votes);
   if (vote === "distraction" && blocked >= SITE_EVIDENCE && allowed === 0) return "distraction";
-  if (vote === "study" && allowed >= SITE_EVIDENCE && blocked === 0) return "study";
+  if (!record.review && vote === "study" && allowed >= SITE_EVIDENCE && blocked === 0) return "study";
   if (vote === "mixed") return "mixed";
   return "";
 }
@@ -91,7 +108,7 @@ export function recordSitePage(record, { verdict, vote = "", reason = "" }, now)
 // Keeps the fetched home-page profile, drops everything that was learned.
 export function forgetSiteRecord(record) {
   const next = { ...(record || {}) };
-  for (const key of ["votes", "allowed", "blocked", "reason", "at", "type"]) delete next[key];
+  for (const key of ["votes", "allowed", "blocked", "reason", "at", "type", "review"]) delete next[key];
   return next;
 }
 

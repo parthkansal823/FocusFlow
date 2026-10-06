@@ -12,7 +12,8 @@ const WEIGHTS = { user: 3, llm: 1 };
 export function buildModel(learned = []) {
   return trainModel([
     ...seedExamples(),
-    ...learned.map(e => ({ text: e.text, label: e.label, weight: WEIGHTS[e.source] || 1 }))
+    ...learned.filter(e => !(e.source === "user" && e.label === "study"))
+      .map(e => ({ text: e.text, label: e.label, weight: WEIGHTS[e.source] || 1 }))
   ]);
 }
 
@@ -53,4 +54,17 @@ export function offlineVerdict(meta, model) {
       ? "Could not verify this as study content"
       : `Offline model: ${pct}% study${signals ? ` (${signals})` : ""}`
   };
+}
+
+// Conservative fast path: require multiple known signals and agreement from
+// the title itself. Probabilities are model scores, not an accuracy guarantee.
+// Unclear or conflicting pages must still go to the LLM.
+export function fastVerdict(meta, model) {
+  if (!String(meta.title || "").trim()) return null;
+  const title = predict(model, meta.title);
+  const all = predict(model, metadataText(meta));
+  const confident = p => p.known >= 3 && (p.pStudy >= 0.98 || p.pStudy <= 0.02);
+  if (!confident(title) || !confident(all) || (title.pStudy >= 0.98) !== (all.pStudy >= 0.98)) return null;
+  const verdict = offlineVerdict(meta, model);
+  return { ...verdict, source: "local", title: meta.title, reason: `Fast local classifier: ${verdict.verdict === "allow" ? "study/tech content" : "distraction"}` };
 }

@@ -10,8 +10,8 @@ const ctx = (patch = {}) => ({
 });
 
 test("strict by default: any unknown website is checked", () => {
-  const d = decide("https://www.instagram.com/reels/abc", ctx());
-  assert.deepEqual(d, { action: "check", key: "page:instagram.com/reels/abc", kind: "page", host: "instagram.com" });
+  const d = decide("https://www.example.com/lesson", ctx());
+  assert.deepEqual(d, { action: "check", key: "page:example.com/lesson", kind: "page", host: "example.com" });
   assert.equal(decide("https://www.youtube.com/watch?v=abcdefghijk", ctx()).kind, "youtube");
 });
 
@@ -21,8 +21,8 @@ test("browser pages and your own dev servers are never checked", () => {
   assert.equal(decide("http://localhost:5173/", ctx()).reason, "local");
 });
 
-test("there are no built-in site lists", () => {
-  for (const url of ["https://netflix.com", "https://leetcode.com/problems/two-sum", "https://github.com"]) {
+test("unknown and mixed sites are not trusted wholesale", () => {
+  for (const url of ["https://netflix.com", "https://leetcode.com/discuss/general", "https://github.com"]) {
     assert.equal(decide(url, ctx()).action, "check", url);
   }
 });
@@ -35,18 +35,18 @@ const evidence = (verdict, vote, n) => {
 
 test("a whole site is only opened or blocked on evidence", () => {
   const sites = {
-    "leetcode.com": evidence("allow", "study", 3),
+    "study.test": evidence("allow", "study", 3),
     "netflix.com": evidence("block", "distraction", 3),
     "reddit.com": evidence("block", "mixed", 5),
     "new.com": evidence("block", "distraction", 2)
   };
-  assert.deepEqual(decide("https://leetcode.com/problems/x", ctx({ sites })), { action: "allow", reason: "site" });
+  assert.deepEqual(decide("https://study.test/lesson", ctx({ sites })), { action: "allow", reason: "site" });
   assert.equal(decide("https://www.netflix.com/browse", ctx({ sites })).reason, "site");
   assert.equal(decide("https://www.netflix.com/browse", ctx({ sites })).action, "block");
   assert.equal(decide("https://reddit.com/r/funny", ctx({ sites })).action, "check"); // the AI says mixed
   assert.equal(decide("https://new.com/a", ctx({ sites })).action, "check"); // not enough pages yet
   // A fetched home-page profile alone changes nothing.
-  assert.equal(decide("https://x.com/", ctx({ sites: { "x.com": { profile: {} } } })).action, "check");
+  assert.equal(decide("https://x.com/user/status/123", ctx({ sites: { "x.com": { profile: {} } } })).action, "check");
 });
 
 test("one study page keeps a site from ever being blocked as a whole", () => {
@@ -69,10 +69,10 @@ test("YouTube is always judged per video, never as a whole site", () => {
   const sites = { "youtube.com": evidence("block", "distraction", 50) };
   assert.equal(decide("https://www.youtube.com/watch?v=abcdefghijk", ctx({ sites })).action, "check");
   assert.equal(decide("https://www.youtube.com/results?search_query=dp", ctx({ sites })).action, "check");
-  assert.equal(decide("https://m.youtube.com/", ctx({ sites })).action, "check");
+  assert.equal(decide("https://m.youtube.com/", ctx({ sites })).reason, "hard");
 });
 
-test("precedence: distraction mark > your rules > study mark > learned site", () => {
+test("hard mode ignores always-allow rules and old study marks", () => {
   const url = "https://reddit.com/r/leetcode";
   const key = "page:reddit.com/r/leetcode";
   const allowRule = [{ pattern: "reddit.com", action: "allow" }];
@@ -81,8 +81,8 @@ test("precedence: distraction mark > your rules > study mark > learned site", ()
   assert.equal(decide(url, ctx({ rules: allowRule, overrides: { [key]: { verdict: "block" } } })).reason, "marked");
   assert.equal(decide(url, ctx({ rules: blockRule, overrides: { [key]: { verdict: "allow" } } })).action, "block");
   const distractionSite = { "reddit.com": evidence("block", "distraction", 3) };
-  assert.equal(decide(url, ctx({ overrides: { [key]: { verdict: "allow" } }, sites: distractionSite })).action, "allow");
-  assert.equal(decide(url, ctx({ rules: allowRule, sites: distractionSite })).action, "allow");
+  assert.equal(decide(url, ctx({ overrides: { [key]: { verdict: "allow" } }, sites: distractionSite })).action, "block");
+  assert.equal(decide(url, ctx({ rules: allowRule, sites: distractionSite })).action, "block");
 });
 
 test("studyMarksToday counts only today's study marks", () => {

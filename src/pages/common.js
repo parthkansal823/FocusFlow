@@ -48,7 +48,9 @@ export function formatTime(at) {
 }
 
 export const SOURCE_LABELS = {
-  llm: "Thinking AI",
+  llm: "Local AI",
+  local: "Fast local classifier",
+  hard: "Hard mode",
   offline: "Offline model",
   site: "Learned site",
   rule: "Your rule",
@@ -64,10 +66,11 @@ export function sourceLabel(entry) {
 
 export function llmSummary(settings, llmStatus) {
   const llm = settings.llm;
+  if (!llm.enabled) return { tone: "ok", text: "Lightweight · no AI server", detail: "Hard mode on. Bundled text classifier; no inference model loaded." };
   if (llmStatus && llmStatus.ok === false) {
     return { tone: "danger", text: "LLM unreachable · offline model", detail: llmStatus.error || "" };
   }
   // With model "auto", show the model that actually answered.
   const model = llm.model === "auto" && llmStatus && llmStatus.model ? llmStatus.model : llm.model;
-  return { tone: "ok", text: `${model} · thinking`, detail: llm.baseUrl };
+  return { tone: "ok", text: `${model} · ${settings.fastMode ? "fast mode" : "AI checks"}`, detail: llm.baseUrl };
 }

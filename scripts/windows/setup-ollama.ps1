@@ -1,14 +1,14 @@
 <#
 .SYNOPSIS
-  Sets up FocusFlow's thinking AI on this Windows PC: free, unlimited, offline,
+  Sets up FocusFlow's local AI on this Windows PC: no metered token API, offline,
   running on your NVIDIA GPU.
 
 .DESCRIPTION
   1. Installs Ollama (with winget) if it isn't installed.
-  2. Tunes it for speed: model kept loaded, 2 parallel requests, flash attention,
+  2. Limits local load: short idle lifetime, 1 parallel request, flash attention,
      compact context memory, and permission for the browser extension.
   3. Restarts Ollama, downloads the model and checks that it runs on the GPU.
-  4. Runs a speed test with two real FocusFlow-style judgements (thinking on).
+  4. Runs a speed test with two short classification requests (reasoning off).
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\windows\setup-ollama.ps1
@@ -16,15 +16,18 @@
   powershell -ExecutionPolicy Bypass -File scripts\windows\setup-ollama.ps1 -Model qwen3:1.7b
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File scripts\windows\setup-ollama.ps1 -TestOnly
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File scripts\windows\setup-ollama.ps1 -TuneOnly
 #>
 [CmdletBinding()]
 param(
-  # qwen3:4b: the best thinking model that runs fully on a 4 GB GPU (e.g. RTX A500).
-  # qwen3:1.7b answers faster; qwen3:8b judges a little better but needs 6+ GB of GPU memory.
-  [string]$Model = "qwen3:4b",
+  # A smaller model reduces inference load; accuracy and memory depend on the machine.
+  [string]$Model = "qwen3:1.7b",
   [string]$Server = "http://localhost:11434",
   # Skip setup and only run the speed test.
   [switch]$TestOnly,
+  # Change only idle lifetime/parallelism and restart; no install, pull or inference.
+  [switch]$TuneOnly,
   # Print what would be changed without changing anything.
   [switch]$DryRun
 )
@@ -41,8 +44,8 @@ $OllamaDir = if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA "Programs\Olla
 # Settings Ollama reads when it starts.
 $OllamaSettings = [ordered]@{
   OLLAMA_ORIGINS         = "chrome-extension://*,moz-extension://*" # let the extension talk to Ollama
-  OLLAMA_KEEP_ALIVE      = "-1"   # keep the model loaded: no waiting for it to load again
-  OLLAMA_NUM_PARALLEL    = "2"    # the page you open never waits behind a background judgement
+  OLLAMA_KEEP_ALIVE      = "2m"   # release model memory after a short idle period
+  OLLAMA_NUM_PARALLEL    = "1"    # avoid simultaneous inference/context allocations
   OLLAMA_FLASH_ATTENTION = "1"    # faster attention on NVIDIA GPUs
   OLLAMA_KV_CACHE_TYPE   = "q8_0" # half-size context memory, so everything stays on a 4 GB GPU
 }
@@ -101,7 +104,7 @@ function Restart-Ollama([string]$Exe) {
   Start-Sleep -Seconds 2
   $app = if ($OllamaDir) { Join-Path $OllamaDir "ollama app.exe" } else { "" }
   if ($app -and (Test-Path $app)) {
-    Start-Process -FilePath $app
+    Start-Process -FilePath $app -WindowStyle Hidden
   } else {
     Start-Process -FilePath $Exe -ArgumentList "serve" -WindowStyle Hidden
   }
@@ -124,23 +127,25 @@ $SystemPrompt = @"
 You are FocusFlow, a strict study filter for a computer-science student preparing for software engineering placements.
 Only study and tech content may open. Everything else is blocked.
 ALLOW only clearly educational or technical content. BLOCK entertainment, music, movies, sports, gaming, vlogs, comedy, memes, social feeds, shopping, and anything you are unsure about.
-Think briefly: a few short sentences are enough. Then give the final answer as one line of JSON:
+No reasoning. Return only one line of JSON:
 {"verdict": "ALLOW" or "BLOCK", "site": "study" or "mixed" or "distraction", "reason": "at most 12 words"}
 "@
 
 # One FocusFlow-style judgement. Returns seconds taken and the verdict.
 function Invoke-Judgement([string]$Title, [string]$Channel, [string]$Category) {
-  $user = "Website: youtube.com`nType: YouTube video`nVideo title: $Title`nChannel: $Channel`nYouTube category: $Category`n`nIs this study/tech content? Answer with the JSON line.`n/think"
+  $user = "Website: youtube.com`nType: YouTube video`nVideo title: $Title`nChannel: $Channel`nYouTube category: $Category`n`nReturn the classification JSON.`n/no_think"
   $body = @{
     model       = $Model
     messages    = @(@{ role = "system"; content = $SystemPrompt }, @{ role = "user"; content = $user })
-    temperature = 0.6
-    max_tokens  = 1536
+    temperature = 0.2
+    max_tokens  = 128
+    reasoning_effort = "none"
+    response_format = @{ type = "json_object" }
     stream      = $false
   } | ConvertTo-Json -Depth 5
   $clock = [Diagnostics.Stopwatch]::StartNew()
   $response = Invoke-RestMethod -Uri "$Server/v1/chat/completions" -Method Post -ContentType "application/json" `
-    -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 300
+    -Body ([Text.Encoding]::UTF8.GetBytes($body)) -TimeoutSec 60
   $clock.Stop()
   $answer = [regex]::Replace([string]$response.choices[0].message.content, "(?s)<think>.*?</think>", "")
   $verdicts = [regex]::Matches($answer.ToUpper(), "\b(ALLOW|BLOCK)\b")
@@ -149,7 +154,7 @@ function Invoke-Judgement([string]$Title, [string]$Channel, [string]$Category) {
 }
 
 function Test-Speed([string]$Exe) {
-  Write-Step "Speed test (thinking on, like FocusFlow)"
+  Write-Step "Speed test (reasoning off, like FocusFlow)"
   if ($DryRun -and -not (Test-Server)) { Write-Note "[dry run] no server to test"; return }
   $first = Invoke-Judgement "Binary Search Introduction | Striver A2Z DSA Course" "take U forward" "Education"
   Write-Note ("First answer (loads the model): {0,5} s  -> {1} (expected ALLOW)" -f $first.Seconds, $first.Verdict)
@@ -167,12 +172,28 @@ function Test-Speed([string]$Exe) {
   }
   if ($warm.Seconds -gt 10) {
     Write-Warn "Slower than expected. Plug in the charger, use the 'Best performance' power mode, or try -Model qwen3:1.7b."
-    Write-Warn "If you install several models, remove the ones you don't want: FocusFlow's 'auto' picks the biggest Qwen3."
+    Write-Warn "Select a smaller installed model in FocusFlow Settings; 'auto' now prefers smaller compatible models."
   }
 }
 
-Write-Host "FocusFlow: thinking AI setup ($Model)" -ForegroundColor Green
+Write-Host "FocusFlow: local AI setup ($Model)" -ForegroundColor Green
 $exe = Find-Ollama
+if ($TuneOnly) {
+  if ($TestOnly) { throw "Choose either -TuneOnly or -TestOnly." }
+  if (-not $exe) { throw "Ollama is not installed; -TuneOnly never installs or downloads models." }
+  Write-Step "Applying idle-memory and concurrency limits (no model download)"
+  foreach ($name in @("OLLAMA_KEEP_ALIVE", "OLLAMA_NUM_PARALLEL")) {
+    $value = $OllamaSettings[$name]
+    Write-Note "$name = $value"
+    if (-not $DryRun) {
+      [Environment]::SetEnvironmentVariable($name, $value, "User")
+      Set-Item -Path "env:$name" -Value $value
+    }
+  }
+  Restart-Ollama $exe
+  Write-Step "Done: AI server on; idle models unload after 2 minutes"
+  return
+}
 if (-not $TestOnly) {
   if (-not $exe) { $exe = Install-Ollama } else { Write-Step "Ollama found"; Write-Note $exe }
   Set-OllamaSettings
@@ -182,5 +203,5 @@ if (-not $TestOnly) {
 Test-Speed $exe
 
 Write-Step "Done"
-Write-Note "In FocusFlow -> Settings -> Thinking AI: choose 'This computer' and Save."
-Write-Note "Model 'auto' picks $Model (the best thinking model installed)."
+Write-Note "In FocusFlow -> Settings -> Local AI & performance: keep AI On, choose model '$Model', and Save."
+Write-Note "Keep local-first decisions enabled for lower latency. Hard mode always stays on."

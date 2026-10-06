@@ -1,158 +1,156 @@
-# FocusFlow: a study-only browser shield
+# FocusFlow — hard-mode study shield
 
-FocusFlow is a Chrome/Edge/Firefox extension for students preparing for SDE placements.
-**Only study and tech content opens. Everything else is blocked, and there is no off switch.**
+An Edge/Chromium extension that allows educational, technical and work-related
+pages while blocking distractions. The interface uses only black, white and grey
+and keeps the popup statistics and three-panel blocked screen.
 
-It doesn't rely on a fixed list of "bad sites". Every page is judged from its own
-metadata by a **thinking** AI (Qwen3) that you run yourself: on your computer, on your own
-free Hugging Face Space, or on a free server. There are no API keys and no daily limits.
-A DSA lecture on YouTube opens while a prank video on YouTube is blocked.
+## Hard mode only
 
-## How it decides
+There is no normal mode, pause button, always-allow rule or study-bypass screen.
 
+- YouTube Shorts, recommendation home feeds and trending/subscription feeds are
+  blocked immediately. Open a lecture link or use a study search instead.
+- Instagram/Facebook Reels and Stories, TikTok, and common social home feeds are
+  blocked without an AI request. Individual articles/posts on mixed sites are
+  still classified, rather than blanket-blocking every domain.
+- YouTube recommendations, comments, end-screen suggestions and Shorts links are
+  hidden; autoplay is turned off when its control is present.
+- Unknown pages are covered and media is paused until a decision arrives. When
+  AI is unavailable, the strict offline classifier decides; uncertain content
+  stays blocked.
+- Old allow rules and study marks do not bypass the hard-mode policy.
+
+An extension cannot prevent its owner from disabling/uninstalling it in the
+browser. It is not tamper-proof parental control. Browser/OS restrictions such
+as Microsoft Family Safety remain unchanged.
+
+## Fast decisions
+
+1. Hard-block paths and your block rules decide first. There is **no manual
+   educational allow-list**. On a site's first allowed visit, local AI checks
+   its homepage and the current page together. For new reviews, only an explicit dedicated-study
+   verdict backed by homepage metadata grants whole-site trust. It lasts 7 days;
+   subsequent pages on that exact host open without scanning, cover screens,
+   network lookups or AI calls. A conflicting verdict removes that trust.
+   YouTube and uncertain/mixed platforms stay page-by-page. Remembered page
+   verdicts are checked before scanning untrusted pages. Older learned sites
+   with three agreeing AI study votes are retained; manual allow rules are not.
+2. Clear titles on reviewed/mixed sites use a conservative on-device text
+   classifier. This requires
+   multiple known signals and agreement between the title and other metadata.
+   It does not wait for a website lookup or AI call.
+3. Ambiguous pages use your local OpenAI-compatible AI server. Qwen reasoning is
+   disabled, the response is short JSON, and streamed responses keep the bounded
+   request alive across the MV3 idle window.
+4. If a request fails or times out, the strict offline model takes over.
+
+The default AI timeout is 15 seconds. Cached pages and obvious local decisions
+can be much faster; new ambiguous pages still depend on the model and hardware.
+Classification is not perfect: an educational page may be blocked, or misleading
+metadata may fool the model. Inspect mistakes with **Settings → Test a page**.
+
+Local AI stays **on by default**. Settings saves local-first decisions; there is
+no UI option to force AI for every clear page. Hard mode is always on, even if
+you disable the optional AI and use the strict bundled classifier alone.
+
+To reduce background load, startup/model warm-up and speculative hover/visible
+link checks are disabled. Only one inference request runs at a time. This avoids
+work on pages you never open, but a cold model may make an unclear page slower.
+Zero resource use or zero laptop slowdown cannot be guaranteed during inference.
+
+## Run on Microsoft Edge
+
+1. Open `edge://extensions` and enable **Developer mode**.
+2. Click **Load unpacked** and select `D:\Projects\DistractionRemove`, the folder
+   containing `manifest.json`. Do not select the ZIP or an old extracted copy.
+3. If it is already installed from this folder, click **Reload**, then refresh
+   existing website tabs so they receive the new content script.
+4. Open FocusFlow → **Settings → Local AI & performance**. Keep AI **On**, and save the local server URL
+   `http://localhost:11434/v1`, model `auto`, and the 15-second timeout.
+5. Test a lecture URL and a distraction URL using **Test a page**.
+
+Chrome/Brave use their corresponding extensions page and the same folder.
+
+## Local AI (no metered token API)
+
+Keep [Ollama](https://ollama.com/download) running. The extension defaults to the
+smaller compatible installed model (Qwen3 preferred). You can explicitly select
+another installed model. A smaller model generally needs less memory, but can
+be less accurate. The extension does not download a model automatically.
+
+```powershell
+ollama pull qwen3:1.7b
 ```
-you open a page
-   │
-   ├─ your rules / your marks ──────────────────────────────▶ open or block
-   ├─ site already proven (3+ pages, all one way) ───────────▶ open or block
-   │
-   └─ otherwise the page is held (covered, media paused) and judged:
-        1. read its metadata   title, description, OpenGraph, JSON-LD, headings
-                               YouTube: category, channel, description, tags (fetched from YouTube)
-        2. look up the site    its home page, fetched once: what is this website about?
-        3. ask the AI          a thinking model (Qwen3, thinking always on) answers
-                               ALLOW/BLOCK and whether the site is study / mixed / distraction
-        4. remember + learn    verdict cached, offline model trained, site evidence updated
-        │
-        └─ AI not running? ──▶ offline model (trained from bundled examples + every AI answer)
-                               strict: if it isn't sure it's study, it's blocked
+
+The existing Windows helper `scripts\windows\setup-ollama.cmd` can install and
+configure Ollama. It changes Ollama's user environment settings and downloads a
+model; inspect it first if you already have a custom Ollama setup. It now sets
+one parallel request and a two-minute idle lifetime instead of keeping the model
+loaded forever. These server-wide settings apply only when you run the helper;
+editing the extension does not silently restart/reconfigure your Ollama service.
+
+If Ollama is already installed, apply just the idle/concurrency limits and
+restart it without installing, downloading or running a model:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\setup-ollama.ps1 -TuneOnly
 ```
 
-- **Pages, not domains.** A whole site is only blocked after at least 3 of its pages were
-  judged distractions and none were study. One study page makes a site "mixed" for good.
-  YouTube is always judged video by video, so study videos are never blocked because other
-  videos are.
-- **No off switch.** No pause, no break timer, no "disable for 10 minutes", and thinking
-  can't be turned off either. If the AI server can't be reached, the offline model keeps blocking.
-- **Fast where it matters.** The videos on your screen and the link under your mouse are judged
-  in the background *before* you click, so opening them is instant. Every verdict is remembered,
-  two requests run in parallel (what you open always goes first), the model is asked to think
-  briefly, and the fixed part of the prompt is cached by the server.
-- **Mistakes can be corrected, with friction.** On a blocked page judged by the AI you can open
-  that one exact page after a 15-second wait and typing *"I am here to study"* (5 per day).
-  From the toolbar you can mark any page as a distraction. Both corrections teach the model.
+This interrupts current Ollama requests. It keeps the server on, but an idle
+model reload will cost time on the next unclear page. Details of these server
+settings are in the [Ollama FAQ](https://docs.ollama.com/faq).
 
-## Setup
+If the server returns 403, allow extension origins and restart Ollama:
 
-### 1. Run the thinking AI (free, unlimited, pick one)
-
-| Where | Speed per new page* | Setup |
-| --- | --- | --- |
-| **Your computer** (Ollama) | ~2–6 s on a 4 GB+ NVIDIA GPU, ~10–30 s on CPU | one script on Windows, fully offline |
-| **Hugging Face Space** | ~10–30 s (2 free CPUs) | upload 2 files, nothing installed |
-| **Your own free server** (Oracle Cloud Always Free, 4 CPUs) | ~5–15 s | one `docker run` |
-
-\* Only for pages nobody has judged yet. Videos on screen and hovered links are judged before
-you click, and every verdict is remembered, so most clicks are instant.
-
-**Your computer, with [Ollama](https://ollama.com)** (recommended if you have an NVIDIA GPU)
-
-On Windows, double-click **`scripts\windows\setup-ollama.cmd`**. It installs Ollama, tunes it
-for speed (model kept loaded, 2 parallel requests, flash attention, compact context memory),
-allows the extension, downloads **Qwen3-4B**, checks that it runs on the GPU, and prints a
-speed test. Use `setup-ollama.cmd -Model qwen3:1.7b` for faster, lighter answers.
-
-Elsewhere:
-
-```bash
-# install from https://ollama.com/download, then:
-ollama pull qwen3:4b          # ~2.5 GB thinking model; fits fully in 4 GB of GPU memory
-OLLAMA_ORIGINS="chrome-extension://*,moz-extension://*" OLLAMA_KEEP_ALIVE=-1 ollama serve
+```powershell
+[Environment]::SetEnvironmentVariable('OLLAMA_ORIGINS', 'chrome-extension://*', 'User')
 ```
 
-The model setting defaults to **auto**, which uses the best thinking model installed on the
-server (Qwen3 first, bigger first; coder and embedding models are skipped). Qwen3-4B is the
-best choice for a 4 GB GPU: Qwen3-8B judges a little better but no longer fits and runs about
-2–3× slower.
+Local inference does not use a paid token quota, but speed and throughput are
+limited by your CPU/GPU and memory. Hosted AI endpoints and known cloud model
+tags are rejected. No Hugging Face deployment or paid hosting is needed.
+The old `hf-space/` reference folder is not used or included in the extension ZIP.
 
-**Hugging Face Space or your own server.** See [`hf-space/README.md`](hf-space/README.md).
-The same two-file Docker setup (llama.cpp + Qwen3) runs on a free Space or any server.
-
-Any OpenAI-compatible server works: set its `/v1` URL in Settings.
-
-### 2. Load the extension
-
-**Chrome / Edge / Brave**: open `chrome://extensions`, turn on *Developer mode*, click
-*Load unpacked* and pick this folder.
-
-**Firefox** (121+): open `about:debugging#/runtime/this-firefox`, click *Load Temporary Add-on*,
-pick `manifest.json`, then allow *Access your data for all websites* in the add-on's permissions.
-
-Nothing needs to be edited or copied: there are no secret files and no API keys in the code.
-
-### 3. Check the connection
-
-Open FocusFlow → **Settings** → *Thinking AI*, pick where it runs → **Save**. It should say "✓ Connected".
-Use **Test a page** to see exactly what FocusFlow reads from a URL and what the AI decides.
-
-## Using it
-
-| Where | What you get |
-| --- | --- |
-| Toolbar popup | Current tab's status, **Block this page**, blocks today and a 7-day chart, recent blocks, AI status |
-| Blocked page | What was blocked and why, *Back to work*, a YouTube study search, and the "This is study content" correction when allowed |
-| Settings | Where the AI runs (computer / HF Space / your server) and which model (auto), **Test a page**, learned sites with their evidence, your own always-allow/always-block rules, your marks, data reset |
+For store distribution, each user needs their own local Ollama installation for
+AI checks; a browser extension cannot bundle and silently start a native server.
 
 ## Privacy
 
-- Page metadata goes only to the AI server **you** run (by default `localhost`).
-- FocusFlow also fetches public pages without cookies: the YouTube watch page of a video you
-  open, and the home page of each new site, to read their metadata.
-- Everything else (verdicts, stats, learned sites) stays in the browser's local storage.
+- Unclear page titles, descriptions and URLs go to your configured loopback AI
+  endpoint only (`localhost`, `127.0.0.1` or `[::1]`). Hosted endpoints are not
+  supported, and AI requests cannot follow redirects to another server.
+- For richer context, FocusFlow fetches public YouTube watch pages and site home
+  pages without browser cookies. Clear local-first decisions skip these lookups.
+- Learned verdicts, training examples, block history and settings stay in the
+  browser's local storage. There is no analytics service or bundled API key.
+- Host permissions are needed to cover/classify websites, fetch public metadata
+  for unclear pages and contact the local AI endpoint.
 
-## Development
+## Development and package
 
-```bash
-npm install          # only Playwright, for the end-to-end tests
-npm test             # unit tests: rules, decision engine, offline model, LLM client, HTML parsing
-npm run test:e2e     # loads the real extension in Chromium against fake sites and a mock LLM
-npm run lint         # manifest/file/import checks
-npm run package      # dist/focusflow-<version>.zip for the stores
+```powershell
+npm ci
+npm test
+npm run lint
+npx playwright install chromium
+npm run test:e2e
+# Test the installed Microsoft Edge instead:
+$env:FOCUSFLOW_BROWSER = 'msedge'
+npm run test:e2e
+npm run package
 ```
 
-The end-to-end tests need Playwright's Chromium (`npx playwright install chromium`).
+`npm run package` produces `dist/focusflow-4.0.2.zip` containing only the manifest,
+icons and extension source. This is a package for submission, not confirmation
+of Microsoft store approval. Store listing, screenshots and a public privacy
+policy must be supplied separately.
 
-```text
-manifest.json                 MV3, one background module for Chrome (service worker) and Firefox
-src/
-  background/
-    index.js                  event wiring: navigation, storage changes, messages
-    controller.js             per-tab state machine, LLM scheduler (priorities, parallel slots), pre-judging
-    metadata.js               metadata from the page, YouTube, and site home pages
-    html-meta.js              HTML metadata parser (service workers have no DOMParser)
-    llm.js                    OpenAI-compatible client, model auto-pick, warm-up, answer parsing
-    actions.js                marks (study / distraction), forget site, reset learning
-  shared/
-    policy.js                 the decision engine + evidence-based site learning (pure, tested)
-    offline.js, model.js      on-device Naive Bayes fallback, trained in the browser
-    training-data.js          bundled seed examples
-    rules.js, stats.js, store.js, defaults.js
-  content/guard.js            holds/covers the page while it's judged; reads metadata; reports links to pre-judge
-  pages/                      popup, options, blocked page
-hf-space/                     Docker setup (llama.cpp + Qwen3) for a free HF Space or your own server
-scripts/windows/              one-click Ollama setup + speed test for Windows
-tests/unit, tests/e2e
-```
-
-### What changed from FocusGuard 3.x
-
-The old version could not run from a fresh clone: `manifest.json` pointed to a `background.js`
-that was git-ignored (only a misspelled `backgronud_sample.js` was committed) and a Gemini
-API key had to be pasted into the source. When Gemini failed, a bug cached **BLOCK** for every
-video for 24 hours, and after in-app navigation YouTube videos were judged by the *previous*
-video's title. Version 4 is a rewrite. A single background controller judges every navigation
-from its metadata, with a local AI and no fixed lists. It reads YouTube metadata from YouTube
-itself, keeps working offline, and is covered by unit and browser tests.
+Browser tests use an isolated temporary profile, synthetic websites and a mock
+AI server. If a machine's Family Safety blocks a synthetic URL, those specific
+tests report a skip; restrictions are not disabled. Unit tests additionally cover
+hard-mode precedence, malformed streams, timeouts, stale navigation verdicts and
+the local fast path, loopback-only AI, smaller-model selection and single-request
+inference. Tests also cover a streamed response longer than 30 seconds.
 
 ## License
 

@@ -5,7 +5,7 @@
 //                           └─ check ─▶ page held ("pending", media paused, covered)
 //                                     ─▶ remembered verdict?
 //                                     ─▶ metadata (page DOM + YouTube/site info from the net)
-//                                     ─▶ local LLM (thinking)  ──▶ site evidence + trains offline model
+//                                     ─▶ local AI ──▶ site review + trains offline model
 //                                         └─ unavailable ─▶ offline model (strict: unsure = block)
 //                                     ─▶ allow | block
 //
@@ -13,8 +13,8 @@
 // hand over page metadata when asked.
 
 import { LIMITS } from "../shared/defaults.js";
-import { buildModel, metadataText, offlineVerdict } from "../shared/offline.js";
-import { decide, recordSitePage } from "../shared/policy.js";
+import { buildModel, fastVerdict, metadataText, offlineVerdict } from "../shared/offline.js";
+import { decide, recordSitePage, siteReview } from "../shared/policy.js";
 import { isWebUrl, isYouTubeHost, normalizeHost, parseUrl, youtubeVideoId } from "../shared/rules.js";
 import { appendHistory, recordBlock } from "../shared/stats.js";
 import * as store from "../shared/store.js";
@@ -23,7 +23,9 @@ import { askLlm } from "./llm.js";
 import { pageFromNet, siteProfileFromNet, youtubeFromNet } from "./metadata.js";
 
 const tabs = new Map(); // tabId -> { url, state: "checking"|"pending"|"allowed"|"blocked", version }
-let stateVersion = 0;
+// A worker can restart while the content script is still alive. Its new state
+// must be newer than the version previously sent to that document.
+let stateVersion = Date.now();
 let contextPromise = null;
 let modelPromise = null;
 let cachePromise = null;
@@ -74,7 +76,7 @@ export function queueWrite(task) {
 }
 
 function llmFingerprint(llm) {
-  return [llm.baseUrl, llm.model].join("|");
+  return ["hard-v4.0.2-ai-site-review", llm.enabled ? "ai" : "lightweight", llm.baseUrl, llm.model].join("|");
 }
 
 async function cachedVerdict(key, llm) {
@@ -109,7 +111,7 @@ function setState(tabId, entry, state) {
   entry.state = state;
   entry.version = ++stateVersion;
   chrome.tabs
-    .sendMessage(tabId, { type: "ff:state", state, version: entry.version }, { frameId: 0 })
+    .sendMessage(tabId, { type: "ff:state", state, version: entry.version, url: entry.url }, { frameId: 0 })
     .catch(() => {}); // no content script yet: it will ask with ff:hello
 }
 
@@ -163,13 +165,14 @@ export function stateForContent(tabId, url) {
   if (!entry || stripHash(entry.url) !== stripHash(url)) evaluateTab(tabId, url);
   const current = tabs.get(tabId);
   if (!current) return { state: "allowed", version: stateVersion };
-  return { state: current.state === "allowed" ? "allowed" : "pending", version: current.version };
+  return { state: current.state === "allowed" ? "allowed" : "pending", version: current.version, url: current.url };
 }
 
 // ---------------------------------------------------------------------------
 // Evaluation
 
 const BLOCK_REASONS = {
+  hard: d => d.detail,
   marked: () => "You marked this page as a distraction",
   rule: d => `${d.pattern} is on your block list`,
   site: (d, ctx) => {
@@ -190,7 +193,7 @@ async function run(tabId, entry) {
   if (decision.action === "block") {
     await blockTab(tabId, entry, {
       kind: decision.reason,
-      source: decision.reason === "site" ? "site" : "rule",
+      source: decision.reason === "site" ? "site" : decision.reason === "hard" ? "hard" : "rule",
       reason: BLOCK_REASONS[decision.reason](decision, ctx)
     });
     return;
@@ -205,12 +208,32 @@ async function run(tabId, entry) {
     const current = tabs.get(tabId);
     return Boolean(current) && stripHash(current.url) === stripHash(entry.url);
   };
-  let verdict = null;
+  let verdict = await cachedVerdict(decision.key, ctx.settings.llm);
+  let livePage = null;
+  const needsSiteReview = ctx.settings.llm.enabled && !isYouTubeHost(decision.host) && !siteReview(ctx.sites[decision.host]);
+  if (!verdict && !ctx.settings.llm.enabled && stillWanted()) {
+    // AI-disabled fallback: one DOM snapshot and the tiny bundled model.
+    // No AI, network metadata, speculative prefetch, or self-training.
+    const page = await metadataFromTab(tabId, entry.url, stillWanted);
+    if (!stillWanted()) return;
+    const meta = { ...(page || {}), url: entry.url, host: decision.host, kind: decision.kind };
+    const model = await getModel();
+    verdict = fastVerdict(meta, model) || { ...offlineVerdict(meta, model), title: meta.title || "" };
+  }
+  if (!verdict && ctx.settings.fastMode && stillWanted()) {
+    // Mixed/reviewed sites and YouTube use the cheap page check. A new site's
+    // first allowed page goes to AI once to review its purpose, not a fixed list.
+    const page = await metadataFromTab(tabId, entry.url, stillWanted);
+    if (page && stillWanted()) {
+      livePage = page;
+      const local = fastVerdict({ ...page, url: entry.url, host: decision.host, kind: decision.kind }, await getModel());
+      if (local?.verdict === "block" || !needsSiteReview) verdict = local;
+    }
+  }
   for (let attempt = 0; !verdict && attempt < 2 && stillWanted(); attempt++) {
     verdict = await verdictFor(decision, ctx, {
-      priority: PRIORITY.now,
       wanted: onThisPage,
-      getMeta: wanted => gatherMetadata(decision, entry.url, { tabId, stillWanted: wanted })
+      getMeta: wanted => gatherMetadata(decision, entry.url, { tabId, stillWanted: wanted, pageMeta: livePage })
     });
   }
   if (!verdict || !stillWanted()) return;
@@ -229,26 +252,10 @@ async function run(tabId, entry) {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-judging: links you are likely to open (videos on screen, the link under
-// the mouse) are judged in the background, so the click is instant.
-
-export async function prefetch(urls, reason) {
-  const ctx = await getContext();
-  if (Date.now() - lastLlmFailureAt < 60_000) return { queued: 0 }; // server down: don't pile up
-  const priority = reason === "hover" ? PRIORITY.hover : PRIORITY.visible;
-  let queued = 0;
-  for (const url of (Array.isArray(urls) ? urls : []).slice(0, 8)) {
-    if (!isWebUrl(url)) continue;
-    const decision = decide(url, ctx);
-    if (decision.action !== "check") continue;
-    queued++;
-    verdictFor(decision, ctx, {
-      priority,
-      prefetch: true,
-      getMeta: () => gatherMetadata(decision, url)
-    }).catch(() => {});
-  }
-  return { queued };
+// Kept for old content scripts. Hovering/scrolling must not start inference or
+// fetch unused pages: local AI is reserved for the page actually being opened.
+export async function prefetch() {
+  return { queued: 0 };
 }
 
 /**
@@ -256,8 +263,15 @@ export async function prefetch(urls, reason) {
  * With a tab, page metadata comes from the live DOM; without one (Settings
  * "test a page"), from the network.
  */
-export async function gatherMetadata(decision, url, { tabId = null, stillWanted = () => true } = {}) {
+export async function gatherMetadata(decision, url, { tabId = null, stillWanted = () => true, pageMeta: collectedPage = null } = {}) {
   const base = { url, host: decision.host, kind: decision.kind };
+  const ctx = await getContext();
+  if (!ctx.settings.llm.enabled) {
+    // A manual Settings test may fetch just the requested page. Browsing reads
+    // its existing DOM, with no additional homepage or video requests.
+    const page = tabId === null ? await pageFromNet(url) : await metadataFromTab(tabId, url, stillWanted);
+    return { ...base, ...(page || {}), url };
+  }
 
   if (decision.kind === "youtube") {
     const fromNet = await youtubeFromNet(youtubeVideoId(url));
@@ -268,7 +282,7 @@ export async function gatherMetadata(decision, url, { tabId = null, stillWanted 
   // yet, wait briefly and let it finish in the background for next time.
   const profile = isYouTubeHost(decision.host) ? null : siteProfile(decision.host);
   const [page, site] = await Promise.all([
-    tabId === null ? pageFromNet(url) : metadataFromTab(tabId, url, stillWanted),
+    collectedPage || (tabId === null ? pageFromNet(url) : metadataFromTab(tabId, url, stillWanted)),
     profile && Promise.race([profile, sleep(LIMITS.siteProfileWaitMs).then(() => null)])
   ]);
   let pageMeta = page;
@@ -324,38 +338,27 @@ function pruneSites(sites) {
 // ---------------------------------------------------------------------------
 // The LLM scheduler
 //
-// Two requests run at once. What you are opening right now always goes first;
-// pre-judging uses at most one slot, so it never makes you wait.
+// Optional AI runs one request at a time to limit local inference load.
+// There are no speculative background inference jobs.
 
-const PRIORITY = { now: 0, hover: 1, visible: 2 };
-const MAX_PARALLEL = 2;
-const MAX_PREFETCH_WAITING = 12;
-const waiting = []; // jobs: { run, priority, seq, wanted, resolve, reject }
+const MAX_PARALLEL = 1;
+const waiting = []; // foreground jobs: { run, wanted, resolve, reject }
 const jobs = new Map(); // content key + model -> job (so the same page is never asked twice)
 let running = 0;
-let runningPrefetch = 0;
-let jobSeq = 0;
-let lastLlmFailureAt = 0;
 
 function pump() {
-  waiting.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
   while (running < MAX_PARALLEL && waiting.length) {
-    const job = waiting[0];
-    const background = job.priority > PRIORITY.now;
-    if (background && runningPrefetch >= 1) break;
-    waiting.shift();
+    const job = waiting.shift();
     if (!job.wanted()) {
       job.resolve(null);
       continue;
     }
     running++;
-    if (background) runningPrefetch++;
     Promise.resolve()
       .then(job.run)
       .then(job.resolve, job.reject)
       .finally(() => {
         running--;
-        if (background) runningPrefetch--;
         pump();
       });
   }
@@ -363,16 +366,8 @@ function pump() {
 
 function schedule(job) {
   return new Promise((resolve, reject) => {
-    Object.assign(job, { resolve, reject, seq: ++jobSeq });
+    Object.assign(job, { resolve, reject });
     waiting.push(job);
-    const queued = waiting.filter(j => j.priority > PRIORITY.now);
-    if (queued.length > MAX_PREFETCH_WAITING) {
-      // Drop the oldest, least likely pre-judgement.
-      queued.sort((a, b) => b.priority - a.priority || a.seq - b.seq);
-      const dropped = queued[0];
-      waiting.splice(waiting.indexOf(dropped), 1);
-      dropped.resolve(null);
-    }
     pump();
   });
 }
@@ -381,7 +376,7 @@ function schedule(job) {
  * The verdict for one piece of content: remembered, already being worked on
  * (then we join that request), or freshly judged.
  */
-async function verdictFor(decision, ctx, { priority, getMeta, wanted = () => true, prefetch = false }) {
+async function verdictFor(decision, ctx, { getMeta, wanted = () => true }) {
   const llm = ctx.settings.llm;
   const cached = await cachedVerdict(decision.key, llm);
   if (cached) return cached;
@@ -389,15 +384,13 @@ async function verdictFor(decision, ctx, { priority, getMeta, wanted = () => tru
   const id = `${decision.key}|${llmFingerprint(llm)}`;
   const existing = jobs.get(id);
   if (existing) {
-    // Someone else started this one; take it over at our (higher) priority.
-    existing.priority = Math.min(existing.priority, priority);
+    // Join an existing request for this exact page.
     existing.wantedBy.push(wanted);
-    if (!prefetch) existing.prefetch = false;
     pump();
     return existing.promise;
   }
 
-  const job = { priority, prefetch, wantedBy: [wanted] };
+  const job = { wantedBy: [wanted] };
   job.wanted = () => job.wantedBy.some(w => w());
   job.promise = (async () => {
     const meta = await getMeta(job.wanted);
@@ -409,12 +402,13 @@ async function verdictFor(decision, ctx, { priority, getMeta, wanted = () => tru
 }
 
 /**
- * Ask the thinking LLM; if it can't be reached, the offline model decides.
+ * Ask local AI; if it can't be reached, the offline model decides.
  * Learns from every LLM answer unless `learn` is false (Settings → Test a page).
  */
 export async function judge(meta, decision, ctx, { job = null, learn = true } = {}) {
   const llm = ctx.settings.llm;
-  const task = job || { priority: PRIORITY.now, prefetch: false, wanted: () => true };
+  if (!llm.enabled) return { ...offlineVerdict(meta, await getModel()), title: meta.title || "" };
+  const task = job || { wanted: () => true };
   let llmError = null;
 
   try {
@@ -426,18 +420,16 @@ export async function judge(meta, decision, ctx, { job = null, learn = true } = 
       source: "llm",
       reason: answer.reason || (answer.verdict === "allow" ? "Study/tech content" : "Not study/tech content"),
       site: answer.site || "",
+      wholeSiteStudy: answer.wholeSiteStudy === true,
       title: meta.title || ""
     };
     if (learn) learnFrom(meta, decision, verdict, llm);
     return verdict;
   } catch (error) {
     llmError = error;
-    if (error.kind === "unreachable" || error.kind === "timeout") lastLlmFailureAt = Date.now();
     reportLlmStatus({ ok: false, error: error.message, kind: error.kind || "error", model: llm.model });
   }
 
-  // Only someone actually waiting on this page needs the offline answer.
-  if (task.prefetch) return null;
   const offline = offlineVerdict(meta, await getModel());
   return {
     ...offline,
@@ -482,6 +474,17 @@ function learnFrom(meta, decision, verdict, llm) {
     const host = decision.host;
     if (!isYouTubeHost(host)) {
       sites[host] = recordSitePage(sites[host], { verdict: verdict.verdict, vote: verdict.site, reason: verdict.reason }, now);
+      if (verdict.site) {
+        // Trust only an explicit whole-site AI verdict backed by its homepage.
+        // Never infer domain-wide trust from our own fast classifier guesses.
+        const reviewedStudy = verdict.verdict === "allow" && verdict.site === "study" &&
+          verdict.wholeSiteStudy === true && Boolean(meta.site?.title || meta.site?.description);
+        sites[host].review = {
+          source: "llm", version: 1, at: now,
+          type: reviewedStudy ? "study" : verdict.site === "distraction" ? "distraction" : "mixed",
+          reason: verdict.reason
+        };
+      }
     }
 
     await store.set({
@@ -524,6 +527,15 @@ export function blockedPageUrl(info) {
 
 async function blockTab(tabId, entry, info) {
   if (!isCurrent(tabId, entry)) return;
+  // A slow verdict or a late redirect event must not replace a newer page.
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (!isCurrent(tabId, entry)) return;
+    if (stripHash(tab.pendingUrl || tab.url) !== stripHash(entry.url)) {
+      tabs.delete(tabId); // let the committed document's next hello re-evaluate
+      return;
+    }
+  } catch { return; }
   entry.state = "blocked";
   try {
     await chrome.tabs.update(tabId, { url: blockedPageUrl({ ...info, url: entry.url }) });

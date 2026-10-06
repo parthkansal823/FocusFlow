@@ -37,6 +37,7 @@ code {
 }
 
 .section {
+  min-width: 0;
   padding: 20px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -52,6 +53,7 @@ code {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
 }
 
 .how {
@@ -120,6 +122,8 @@ code {
   gap: 14px;
 }
 
+.grid-2 > *, .with-button > .input { min-width: 0; }
+
 .span-2 {
   grid-column: 1 / -1;
 }
@@ -165,6 +169,8 @@ code {
   padding: 3px;
   border-radius: var(--radius-sm);
   background: var(--surface-2);
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 
 .tab {

@@ -33,23 +33,25 @@ function fakeFetch(handler) {
   return impl;
 }
 
-test("defaults: local Ollama, best installed model", () => {
+test("defaults: local AI on with automatic installed-model selection", () => {
   const defaults = normalizeLlm({});
   assert.equal(defaults.baseUrl, "http://localhost:11434/v1");
   assert.equal(defaults.model, "auto");
+  assert.equal(defaults.enabled, true);
 });
 
-test("rankModel prefers Qwen3 thinking models, bigger first, and skips the wrong kinds", () => {
+test("rankModel prefers smaller Qwen3 models and excludes embeddings/vision/cloud", () => {
   const installed = [
     "llama3.2:3b", "qwen3:1.7b", "qwen3:4b", "nomic-embed-text:latest", "qwen3-coder:30b",
     "deepseek-r1:8b", "qwen3-embedding:4b", "qwen3:8b"
   ];
   const ranked = installed.filter(id => rankModel(id) >= 0).sort((a, b) => rankModel(b) - rankModel(a));
-  assert.deepEqual(ranked.slice(0, 4), ["qwen3:8b", "qwen3:4b", "qwen3:1.7b", "deepseek-r1:8b"]);
+  assert.deepEqual(ranked.slice(0, 4), ["qwen3:1.7b", "qwen3:4b", "qwen3:8b", "deepseek-r1:8b"]);
   assert.ok(rankModel("nomic-embed-text:latest") < 0);
   assert.ok(rankModel("qwen3-embedding:4b") < 0);
   assert.ok(rankModel("qwen3-coder:30b") < rankModel("qwen3:1.7b"));
-  assert.ok(rankModel("qwen3:4b-thinking-2507-q4_K_M") > rankModel("qwen3:4b"));
+  assert.ok(rankModel("qwen3:4b-thinking-2507-q4_K_M") < rankModel("qwen3:4b"));
+  assert.ok(rankModel("qwen3:4b-cloud") < 0);
 });
 
 test("model 'auto' asks the server what's installed and uses the best", async () => {
@@ -58,10 +60,10 @@ test("model 'auto' asks the server what's installed and uses the best", async ()
       ? { json: { data: [{ id: "llama3.2:3b" }, { id: "qwen3:4b" }, { id: "qwen3:1.7b" }] } }
       : { json: reply('{"verdict":"ALLOW","site":"mixed","reason":"Lecture"}') }
   );
-  const auto = normalizeLlm({ baseUrl: "http://auto.test/v1", model: "auto" });
+  const auto = normalizeLlm({ baseUrl: "http://localhost:18001/v1", model: "auto" });
   const result = await askLlm(meta, auto, { fetchImpl });
-  assert.equal(result.model, "qwen3:4b");
-  assert.equal(fetchImpl.calls.find(c => c.url.endsWith("/chat/completions")).body.model, "qwen3:4b");
+  assert.equal(result.model, "qwen3:1.7b");
+  assert.equal(fetchImpl.calls.find(c => c.url.endsWith("/chat/completions")).body.model, "qwen3:1.7b");
 
   // Remembered for a while: the next question doesn't list models again.
   await askLlm(meta, auto, { fetchImpl });
@@ -70,35 +72,36 @@ test("model 'auto' asks the server what's installed and uses the best", async ()
   // Warm-up loads that model with a 1-token request.
   await warmUp(auto, { fetchImpl });
   const warm = fetchImpl.calls.at(-1);
-  assert.equal(warm.body.model, "qwen3:4b");
+  assert.equal(warm.body.model, "qwen3:1.7b");
   assert.equal(warm.body.max_tokens, 1);
 });
 
 test("model 'auto' with nothing installed explains what to do", async () => {
   const fetchImpl = fakeFetch(() => ({ json: { data: [{ id: "nomic-embed-text" }] } }));
   await assert.rejects(
-    resolveModel(normalizeLlm({ baseUrl: "http://empty.test/v1", model: "auto" }), { fetchImpl }),
-    /No model installed.*qwen3:4b/
+    resolveModel(normalizeLlm({ baseUrl: "http://localhost:18002/v1", model: "auto" }), { fetchImpl }),
+    /No model installed.*qwen3:1.7b/
   );
 });
 
-test("prompt carries the metadata, and thinking is always on", () => {
+test("prompt carries metadata and disables reasoning for low latency", () => {
   const prompt = buildUserPrompt({ ...meta, site: { title: "YouTube", description: "Share videos" } });
   assert.match(prompt, /Video title: Binary Search in one shot/);
   assert.match(prompt, /YouTube category: Education/);
   assert.match(prompt, /Channel: take U forward/);
   assert.match(prompt, /About the website/);
-  assert.match(prompt, /\/think$/);
+  assert.match(prompt, /\/no_think$/);
 
   const request = buildRequest(meta, llm);
-  assert.equal(request.max_tokens, 1536);
-  assert.equal(request.stream, false);
-  assert.match(request.messages[0].content, /Think briefly/);
+  assert.equal(request.max_tokens, 128);
+  assert.equal(request.stream, true);
+  assert.equal(request.reasoning_effort, "none");
+  assert.match(request.messages[0].content, /untrusted data/);
 });
 
 test("parseAnswer reads JSON, ignores the thinking, and falls back to plain words", () => {
   assert.deepEqual(parseAnswer(reply('{"verdict":"ALLOW","site":"mixed","reason":"DSA lecture"}')), {
-    verdict: "allow", site: "mixed", reason: "DSA lecture"
+    verdict: "allow", site: "mixed", wholeSiteStudy: false, reason: "DSA lecture"
   });
   const withThinking = reply('<think>It mentions a movie, so BLOCK? No, ALLOW...</think>\n{"verdict": "BLOCK", "site": "distraction", "reason": "Movie trailer"}');
   assert.equal(parseAnswer(withThinking).verdict, "block");
@@ -111,6 +114,8 @@ test("parseAnswer reads JSON, ignores the thinking, and falls back to plain word
     /ran out of tokens/
   );
   assert.equal(stripThinking("<think>a</think>b"), "b");
+  assert.equal(parseAnswer(reply('{"verdict":"ALLOW","site":"study","whole_site_study":true}')).wholeSiteStudy, true);
+  assert.equal(parseAnswer(reply('{"verdict":"ALLOW","site":"study","whole_site_study":"true"}')).wholeSiteStudy, false);
 });
 
 test("askLlm posts an OpenAI-compatible request", async () => {
@@ -120,6 +125,7 @@ test("askLlm posts an OpenAI-compatible request", async () => {
   const [call] = fetchImpl.calls;
   assert.equal(call.url, "http://localhost:11434/v1/chat/completions");
   assert.equal(call.init.headers.Authorization, "Bearer secret");
+  assert.equal(call.init.redirect, "error", "localhost cannot redirect metadata to a remote AI server");
   assert.equal(call.body.model, "qwen3:1.7b");
   assert.equal(call.body.messages[0].role, "system");
 });
@@ -156,4 +162,49 @@ test("listModels understands OpenAI-style model lists", async () => {
   const fetchImpl = fakeFetch(() => ({ json: { data: [{ id: "qwen3:1.7b" }, { id: "llama3.2" }] } }));
   assert.deepEqual(await listModels(llm, { fetchImpl }), ["qwen3:1.7b", "llama3.2"]);
   assert.equal(fetchImpl.calls[0].url, "http://localhost:11434/v1/models");
+});
+
+test("direct AI requests reject hosted URLs and cloud models before any fetch", async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls++; throw new Error("Must not fetch"); };
+  const remote = { ...llm, baseUrl: "https://example.com/v1" };
+  await assert.rejects(askLlm(meta, remote, { fetchImpl }), /Only a local AI server/);
+  await assert.rejects(listModels(remote, { fetchImpl }), /Only a local AI server/);
+  await assert.rejects(askLlm(meta, { ...llm, model: "gemma4:cloud" }, { fetchImpl }), /not a cloud model/);
+  assert.equal(calls, 0);
+});
+
+test("streamed chunks can split lines and Unicode; reasoning is not a verdict", async () => {
+  const encoded = new TextEncoder().encode([
+    ': keepalive\r\n\r\n',
+    'data: {"choices":[{"delta":{"reasoning_content":"BLOCK"}}]}\r\n\r\n',
+    `data: ${JSON.stringify({ choices: [{ delta: { content: '{"verdict":"ALLOW","site":"mixed","reason":"पढ़ाई"}' } }] })}\n\n`,
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+    'data: [DONE]\n\n'
+  ].join(''));
+  const fetchImpl = async () => new Response(new ReadableStream({
+    start(controller) {
+      for (let i = 0; i < encoded.length; i += 7) controller.enqueue(encoded.slice(i, i + 7));
+      controller.close();
+    }
+  }), { headers: { "content-type": "text/event-stream" } });
+  const result = await askLlm(meta, llm, { fetchImpl });
+  assert.equal(result.verdict, "allow");
+  assert.equal(result.reason, "पढ़ाई");
+});
+
+test("timeout also aborts a response body after headers arrived", async () => {
+  const fetchImpl = async (_url, { signal }) => new Response(new ReadableStream({
+    start(controller) {
+      signal.addEventListener("abort", () => controller.error(new DOMException("aborted", "AbortError")));
+    }
+  }), { headers: { "content-type": "text/event-stream" } });
+  await assert.rejects(askLlm(meta, { ...llm, timeoutSec: 0.05 }, { fetchImpl }), error => error.kind === "timeout");
+});
+
+test("malformed and truncated streams cannot allow an unchecked page", async () => {
+  for (const stream of ['data: invalid\n\n', 'data: {"choices":[{"delta":{"reasoning_content":"ALLOW"},"finish_reason":"length"}]}\n\n']) {
+    const fetchImpl = async () => new Response(stream, { headers: { "content-type": "text/event-stream" } });
+    await assert.rejects(askLlm(meta, llm, { fetchImpl }), error => error.kind === "bad-answer");
+  }
 });

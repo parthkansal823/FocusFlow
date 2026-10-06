@@ -5,7 +5,7 @@
 // Run with: npm run test:e2e
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import { tmpdir } from "node:os";
@@ -19,6 +19,7 @@ const tmp = mkdtempSync(join(tmpdir(), "focusflow-e2e-"));
 const llmRequests = [];
 const warmUps = [];
 let llmDown = false;
+let streamDelay = 0;
 let webServer, llmServer, context, extPage, extensionId, llmPort;
 
 // ---------------------------------------------------------------------------
@@ -33,13 +34,20 @@ const youtubeWatch = ({ title, channel, category, description }) =>
   page({
     title: `${title} - YouTube`,
     head: `<meta name="title" content="${title}"><meta name="description" content="${description}">`,
-    body: `<video src="data:," autoplay muted></video><script>var ytInitialPlayerResponse = ${JSON.stringify({
+    body: `<video src="data:," autoplay muted></video><aside id="related">More recommendations</aside><section id="comments">Comments</section>
+      <button class="ytp-autonav-toggle-button" aria-checked="true" onclick="this.setAttribute('aria-checked','false')">Autoplay</button>
+      <script>var ytInitialPlayerResponse = ${JSON.stringify({
       videoDetails: { title, author: channel, shortDescription: description },
       microformat: { playerMicroformatRenderer: { category, ownerChannelName: channel } }
     })};</script>`
   });
 
 const SITES = {
+  "school.test": {
+    "/": page({ title: "School", description: "A dedicated platform for mathematics and algorithms courses." }),
+    "/lesson": page({ title: "Algorithms Introduction", body: '<a id="next" href="/module-2">Next module</a>' }),
+    "/module-2": page({ title: "Module 2" })
+  },
   "www.youtube.com": {
     "/": page({ title: "YouTube", description: "Enjoy the videos and music you love." }),
     "/watch?v=studyvid001": youtubeWatch({
@@ -115,6 +123,8 @@ const SITES = {
       description: "A practical guide to binary search for coding interviews.",
       body: `<button id="go">Next post</button><script src="/spa.js"></script>`
     }),
+    "/posts/fast-study": page({ title: "Binary search explained", description: "Binary search algorithms tutorial." }),
+    "/posts/fast-fun": page({ title: "Funny cat videos compilation", description: "Funny cat videos and comedy compilation." }),
     "/spa.js": "document.getElementById('go').onclick = () => { history.pushState({}, '', '/posts/celebrity-gossip'); document.title = 'Celebrity gossip roundup'; };"
   },
   "fun.test": {
@@ -148,10 +158,10 @@ function serveSite(req, res) {
 
 function judge(prompt) {
   const website = (prompt.match(/^Website: (.*)$/m) || [])[1] || "";
-  const study = /binary search|dynamic programming|Education|algorithms/i.test(prompt) &&
+  const study = (website === "school.test" || /binary search|dynamic programming|Education|algorithms/i.test(prompt)) &&
     !/gossip|Comedy|prank|meme/i.test(prompt.split("About the website")[0] + (prompt.match(/(Page|Video) title: .*/) || [""])[0]);
-  const site = website === "fun.test" ? "distraction" : "mixed";
-  return { verdict: study ? "ALLOW" : "BLOCK", site, reason: study ? "Algorithms study material" : "Entertainment" };
+  const site = website === "school.test" ? "study" : website === "fun.test" ? "distraction" : "mixed";
+  return { verdict: study ? "ALLOW" : "BLOCK", site, whole_site_study: website === "school.test", reason: study ? "Algorithms study material" : "Entertainment" };
 }
 
 function serveLlm(req, res) {
@@ -171,6 +181,17 @@ function serveLlm(req, res) {
     }
     llmRequests.push({ body, prompt });
     const answer = judge(prompt);
+    if (body.stream) {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      res.write(": starting\n\n");
+      const timer = setTimeout(() => {
+        res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: JSON.stringify(answer) } }] })}\n\n`);
+        res.write('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+        res.end("data: [DONE]\n\n");
+      }, streamDelay || (prompt.includes("binary search") ? 1800 : 100));
+      res.on("close", () => clearTimeout(timer));
+      return;
+    }
     setTimeout(() => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
@@ -191,7 +212,10 @@ const listen = server => new Promise(done => server.listen(0, "127.0.0.1", () =>
 // evaluate doesn't expose them).
 async function setLlm(patch) {
   await extPage.evaluate(async patch => {
-    const { settings = {} } = await chrome.storage.local.get("settings");
+    // Edge can defer its first onInstalled event. Use the production normalizer
+    // rather than assuming the raw storage object has already been initialized.
+    const { getSettings } = await import(chrome.runtime.getURL("src/shared/store.js"));
+    const settings = await getSettings();
     await chrome.storage.local.set({ settings: { ...settings, llm: { ...(settings.llm || {}), ...patch } } });
   }, patch);
 }
@@ -216,10 +240,15 @@ async function waitForBlocked(tab, url, timeout = 15000) {
     }
     await new Promise(done => setTimeout(done, 100));
   }
-  throw new Error(`${url} was not blocked (tab is at ${tab.url()})`);
+  const current = new URL(tab.url());
+  throw new Error(`${url} was not blocked (tab is at ${current.origin}${current.pathname})`);
 }
 
 const storage = key => extPage.evaluate(async key => (await chrome.storage.local.get(key))[key], key);
+const safetyNotice = tab => {
+  const url = new URL(tab.url());
+  return url.hostname === "sdx.microsoft.com" && url.pathname === "/family/restricted-web";
+};
 
 before(async () => {
   execFileSync("openssl", [
@@ -232,7 +261,7 @@ before(async () => {
   llmPort = await listen(llmServer);
 
   context = await chromium.launchPersistentContext(join(tmp, "profile"), {
-    channel: "chromium",
+    channel: process.env.FOCUSFLOW_BROWSER || "chromium",
     headless: true,
     ignoreHTTPSErrors: true,
     args: [
@@ -257,17 +286,23 @@ after(async () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test("the extension loads with strict defaults and no fixed lists", async () => {
+test("the extension loads with local AI on, hard mode and no idle warm-up", async () => {
   const settings = await storage("settings");
-  assert.equal(settings.version, 3);
+  assert.equal(settings.version, 4);
   assert.deepEqual(settings.rules, []);
-  assert.ok(!("think" in settings.llm), "no way to switch thinking off");
+  assert.equal(settings.fastMode, true);
+  assert.equal(settings.llm.enabled, true);
+  assert.equal(warmUps.length, 0, "install/settings changes must not load an idle AI model");
+  await extPage.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get("settings");
+    await chrome.storage.local.set({ settings: { ...settings, fastMode: false } });
+  }); // exercise the full AI pipeline below; fast mode gets its own test
 });
 
 test("a study page on a mixed site opens after the local AI judges its metadata", async () => {
   const tab = await context.newPage();
   const before = llmRequests.length;
-  await tab.goto("https://blog.test/posts/binary-search");
+  await tab.goto("https://blog.test/posts/binary-search", { waitUntil: "commit" });
   // While the (slow) thinking model works, the page is covered.
   await tab.waitForSelector("focusflow-cover", { state: "attached", timeout: 5000 });
   await tab.waitForSelector("focusflow-cover", { state: "detached", timeout: 15000 });
@@ -277,11 +312,16 @@ test("a study page on a mixed site opens after the local AI judges its metadata"
   assert.ok(request, "LLM was asked about the page");
   assert.match(request.prompt, /Description: A practical guide to binary search/);
   assert.match(request.prompt, /About the website \(its home page\): Blog Test — Stories about tech/);
-  assert.match(request.prompt, /\/think$/);
+  assert.match(request.prompt, /\/no_think$/);
+  assert.equal(request.body.reasoning_effort, "none");
   assert.equal(request.body.model, "qwen3:1.7b", "model 'auto' picked the installed Qwen3");
-  assert.ok(warmUps.some(w => w.model === "qwen3:1.7b"), "the model was warmed up when the server was set");
+  assert.equal(warmUps.length, 0, "the actual page is judged without a speculative warm-up");
 
   // One judged page is evidence, not a verdict on the whole site.
+  await extPage.waitForFunction(async () => {
+    const { sites } = await chrome.storage.local.get("sites");
+    return sites?.["blog.test"]?.allowed === 1 && sites["blog.test"].votes?.mixed === 1;
+  }, null, { timeout: 5000 });
   const sites = await storage("sites");
   assert.equal(sites["blog.test"].allowed, 1);
   assert.equal(sites["blog.test"].votes.mixed, 1);
@@ -293,8 +333,8 @@ test("distractions are blocked page by page; a whole site only after 3 agree", a
   await visit(tab, "https://fun.test/prank");
   await waitForBlocked(tab, "https://fun.test/prank");
   assert.match(await tab.textContent("#what"), /Epic prank compilation/);
-  assert.equal(await tab.textContent("#sourceChip"), "Thinking AI");
-  assert.equal(await tab.isVisible("#appeal"), true, "AI verdicts can be appealed");
+  assert.equal(await tab.textContent("#sourceChip"), "Local AI");
+  assert.equal(await tab.locator("#appeal").count(), 0, "hard mode has no study bypass");
 
   // One or two blocked pages are not enough to block the whole site.
   for (const path of ["/other", "/third"]) {
@@ -319,6 +359,9 @@ test("YouTube videos are judged from YouTube's own metadata (category, channel)"
   await tab.goto("https://www.youtube.com/watch?v=studyvid001");
   await tab.waitForTimeout(2500);
   assert.match(tab.url(), /watch\?v=studyvid001/);
+  assert.equal(await tab.isVisible("#related"), false);
+  assert.equal(await tab.isVisible("#comments"), false);
+  assert.equal(await tab.getAttribute(".ytp-autonav-toggle-button", "aria-checked"), "false");
   const study = llmRequests.find(r => r.prompt.includes("Lecture 19"));
   assert.match(study.prompt, /YouTube category: Education/);
   assert.match(study.prompt, /Channel: MIT OpenCourseWare/);
@@ -349,13 +392,18 @@ test("YouTube videos are judged from YouTube's own metadata (category, channel)"
   await tab.close();
 });
 
-test("in-page (SPA) navigation is judged too", async () => {
+test("in-page (SPA) navigation is judged too", async t => {
   const tab = await context.newPage();
+  t.after(() => tab.close());
   await tab.goto("https://blog.test/posts/spa");
   await tab.waitForTimeout(2500);
   assert.match(tab.url(), /posts\/spa$/);
   await tab.click("#go");
-  await waitForBlocked(tab, "https://blog.test/posts/celebrity-gossip");
+  try { await waitForBlocked(tab, "https://blog.test/posts/celebrity-gossip"); }
+  catch (error) {
+    if (safetyNotice(tab)) return t.skip("Edge Family Safety blocks this synthetic SPA URL; browser restrictions are left unchanged");
+    throw error;
+  }
   assert.match(await tab.textContent("#what"), /Celebrity gossip/);
 
   // blog.test has study and non-study pages: it stays page-by-page.
@@ -387,42 +435,37 @@ test("a settings change during a slow check still judges the real page", async (
   await tab.close();
 });
 
-test("videos on screen are judged before you click them", async () => {
+test("unused visible videos do not trigger background AI checks", async t => {
   const tab = await context.newPage();
-  await tab.goto("https://www.youtube.com/results?search_query=graph+algorithms");
-  // The two result videos get judged in the background while you look at the list.
-  const deadline = Date.now() + 15000;
-  const judged = () => ["Dijkstra's shortest path", "Topological sort algorithm"]
-    .every(title => llmRequests.some(r => r.prompt.includes(title)));
-  while (!judged() && Date.now() < deadline) await tab.waitForTimeout(100);
-  assert.ok(judged(), "visible videos were pre-judged");
-
-  // Clicking is now instant: no new AI request, no cover.
+  t.after(() => tab.close());
+  await visit(tab, "https://www.youtube.com/results?search_query=graph+algorithms");
+  await tab.waitForTimeout(2500);
+  if (safetyNotice(tab)) return t.skip("Edge Family Safety blocks the synthetic results URL; browser restrictions are left unchanged");
+  assert.ok(!llmRequests.some(r => /Dijkstra's shortest path|Topological sort algorithm/.test(r.prompt)), "only the opened search page is judged");
   const before = llmRequests.length;
   await tab.click("#v3");
   await tab.waitForURL(/studyvid003/);
-  await tab.waitForTimeout(800);
+  await tab.waitForSelector("focusflow-cover", { state: "detached", timeout: 15000 });
   assert.match(tab.url(), /watch\?v=studyvid003/);
-  assert.equal(llmRequests.length, before);
+  assert.equal(llmRequests.length, before + 1, "AI judges the lecture only after it is opened");
   assert.equal(await tab.locator("focusflow-cover").count(), 0);
   await tab.close();
 });
 
-test("the link under the mouse is judged before the click", async () => {
+test("hovering unused links does not use AI; opening the link still checks it", async () => {
   const tab = await context.newPage();
   await tab.goto("https://blog.test/posts/links");
   await tab.waitForTimeout(2500); // the page itself gets judged first
   await tab.hover("#next");
-  const deadline = Date.now() + 15000;
-  const judged = () => llmRequests.some(r => r.prompt.includes("Binary search on answers"));
-  while (!judged() && Date.now() < deadline) await tab.waitForTimeout(100);
-  assert.ok(judged(), "hovered link was pre-judged");
+  await tab.waitForTimeout(1000);
+  assert.ok(!llmRequests.some(r => r.prompt.includes("Page title: Binary search on answers")), "hovering does not start inference");
 
   const before = llmRequests.length;
   await tab.click("#next");
   await tab.waitForURL(/next-binary-search/);
-  await tab.waitForTimeout(800);
-  assert.equal(llmRequests.length, before);
+  await tab.waitForTimeout(2200); // no-cover must be checked after the real verdict, not before it appears
+  await tab.waitForSelector("focusflow-cover", { state: "detached", timeout: 15000 });
+  assert.equal(llmRequests.length, before + 1);
   await tab.close();
 });
 
@@ -471,7 +514,7 @@ test("the popup and settings pages render the learned state", async () => {
   await options.close();
 });
 
-test("'This is study content' needs a wait and the exact sentence, then opens the page", async () => {
+test("hard mode removes the study-bypass screen and rejects its API", async () => {
   const tab = await context.newPage();
   await visit(tab, "https://fun.test/"); // learned distraction site: no appeal possible
   await waitForBlocked(tab, "https://fun.test/");
@@ -479,18 +522,117 @@ test("'This is study content' needs a wait and the exact sentence, then opens th
 
   await visit(tab, "https://blog.test/posts/nope"); // 404 page on a mixed site -> AI blocks it
   await waitForBlocked(tab, "https://blog.test/posts/nope");
-  await tab.click("#appeal summary");
-  assert.equal(await tab.isDisabled("#appealSubmit"), true);
-  await tab.waitForFunction(() => !document.querySelector("#appealSubmit").disabled, null, { timeout: 20000 });
-  await tab.fill("#appealInput", "let me in");
-  await tab.click("#appealSubmit");
-  assert.match(await tab.textContent("#appealError"), /exactly/);
-  await tab.fill("#appealInput", "I am here to study");
-  await tab.click("#appealSubmit");
-  await tab.waitForURL("https://blog.test/posts/nope", { timeout: 10000 });
-  await tab.waitForTimeout(1000);
-  assert.equal(tab.url(), "https://blog.test/posts/nope");
-  const overrides = await storage("overrides");
-  assert.equal(overrides["page:blog.test/posts/nope"].verdict, "allow");
+  assert.equal(await tab.locator("#appeal").count(), 0);
+  assert.match(await tab.textContent("#lockedNote"), /cannot be bypassed/);
+  const result = await extPage.evaluate(() => chrome.runtime.sendMessage({ type: "ff:mark-study", key: "page:blog.test/posts/nope", url: "https://blog.test/posts/nope" }));
+  assert.equal(result.ok, false);
+  assert.match(result.error, /Hard mode/);
   await tab.close();
+});
+
+test("AI decides a site's educational purpose once; further pages need no scan or AI call", async t => {
+  const tab = await context.newPage();
+  t.after(() => tab.close());
+  const before = llmRequests.length;
+  const started = Date.now();
+  await tab.goto("https://school.test/lesson");
+  await tab.waitForTimeout(700);
+  await tab.waitForSelector("focusflow-cover", { state: "detached" });
+  assert.equal(llmRequests.length, before + 1, "the AI, not a built-in host list, reviewed the initial site");
+  const sites = await storage("sites");
+  assert.equal(sites["school.test"].review.type, "study");
+  assert.equal(sites["school.test"].review.source, "llm");
+  await tab.click("#next");
+  await tab.waitForURL("https://school.test/module-2");
+  await tab.waitForTimeout(350);
+  assert.equal(await tab.locator("focusflow-cover").count(), 0);
+  assert.equal(llmRequests.length, before + 1);
+  assert.equal(warmUps.length, 0);
+  t.diagnostic(`AI site review + repeat-page navigation + test waits: ${Date.now() - started}ms`);
+});
+
+test("fast mode opens study and blocks distractions without any LLM requests", async t => {
+  await extPage.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get("settings");
+    await chrome.storage.local.set({ settings: { ...settings, fastMode: true } });
+  });
+  const tab = await context.newPage();
+  t.after(() => tab.close());
+  const before = llmRequests.length;
+  const started = Date.now();
+  await tab.goto("https://blog.test/posts/fast-study");
+  await tab.waitForSelector("focusflow-cover", { state: "detached" });
+  assert.equal(tab.url(), "https://blog.test/posts/fast-study");
+  assert.equal(llmRequests.length, before);
+  t.diagnostic(`Study page navigation + local decision: ${Date.now() - started}ms`);
+  await visit(tab, "https://blog.test/posts/fast-fun");
+  await waitForBlocked(tab, "https://blog.test/posts/fast-fun");
+  assert.equal(await tab.textContent("#sourceChip"), "Fast local classifier");
+  assert.equal(llmRequests.length, before);
+});
+
+test("a streamed AI answer survives the MV3 idle window", async t => {
+  await extPage.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get("settings");
+    await chrome.storage.local.set({ settings: { ...settings, fastMode: false } });
+  });
+  await setLlm({ timeoutSec: 50 });
+  streamDelay = 32_000;
+  const tab = await context.newPage();
+  t.after(async () => { streamDelay = 0; await setLlm({ timeoutSec: 20 }); await tab.close(); });
+  await tab.goto("https://blog.test/posts/binary-search?long-stream=1", { waitUntil: "commit" });
+  await tab.waitForSelector("focusflow-cover", { state: "attached" });
+  await tab.waitForSelector("focusflow-cover", { state: "detached", timeout: 45_000 });
+  assert.equal(tab.url(), "https://blog.test/posts/binary-search?long-stream=1");
+  assert.ok(llmRequests.some(r => r.prompt.includes("long-stream=1")));
+});
+
+test("hard mode blocks Shorts and home feeds immediately with no AI", async t => {
+  const tab = await context.newPage();
+  t.after(() => tab.close());
+  const before = llmRequests.length;
+  for (const url of ["https://www.youtube.com/shorts/studyvid001", "https://www.youtube.com/"]) {
+    const started = Date.now();
+    await visit(tab, url);
+    await waitForBlocked(tab, url);
+    assert.equal(await tab.textContent("#sourceChip"), "Hard mode");
+    assert.equal(await tab.locator("#appeal").count(), 0);
+    t.diagnostic(`Hard-block navigation: ${Date.now() - started}ms`);
+  }
+  assert.equal(llmRequests.length, before);
+});
+
+test("black-white UI renders in light, dark and narrow layouts", async t => {
+  const previews = join(root, "dist", "preview");
+  mkdirSync(previews, { recursive: true });
+  const tab = await context.newPage();
+  t.after(() => tab.close());
+  const checkGrey = async () => {
+    const colors = await tab.evaluate(() => {
+      const style = getComputedStyle(document.body);
+      return [style.color, style.backgroundColor];
+    });
+    for (const color of colors) {
+      const channels = color.match(/\d+/g).slice(0, 3).map(Number);
+      assert.equal(channels[0], channels[1]); assert.equal(channels[1], channels[2]);
+    }
+  };
+  await tab.setViewportSize({ width: 1280, height: 800 });
+  await tab.emulateMedia({ colorScheme: "light", reducedMotion: "reduce" });
+  await tab.goto(`chrome-extension://${extensionId}/src/pages/blocked/blocked.html?url=https%3A%2F%2Ffun.test%2F&kind=hard&source=hard&title=Distraction&reason=Hard%20mode%3A%20social%20feeds%20are%20blocked`);
+  await tab.waitForFunction(() => document.querySelector("#motivation")?.textContent);
+  await checkGrey();
+  await tab.screenshot({ path: join(previews, "blocked-light.png") });
+  await tab.emulateMedia({ colorScheme: "dark" });
+  await checkGrey();
+  await tab.screenshot({ path: join(previews, "blocked-dark.png") });
+  await tab.setViewportSize({ width: 360, height: 800 });
+  await tab.goto(`chrome-extension://${extensionId}/src/pages/options/options.html`);
+  await tab.waitForFunction(() => document.querySelector("#baseUrl")?.value);
+  assert.equal(await tab.inputValue("#aiEnabled"), "true");
+  assert.equal(await tab.locator('[data-preset="hfSpace"], #helpHf').count(), 0);
+  assert.deepEqual(await tab.locator("#newAction option").allTextContents(), ["Always block"]);
+  assert.equal(await tab.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+  await checkGrey();
+  await tab.screenshot({ path: join(previews, "settings-narrow.png"), fullPage: true });
 });

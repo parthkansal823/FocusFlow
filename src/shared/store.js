@@ -30,22 +30,37 @@ function clampInt(value, min, max, fallback) {
 
 const isHttpUrl = value => typeof value === "string" && /^https?:\/\/[^\s]+$/i.test(value.trim());
 
+export function isLocalAiUrl(value) {
+  if (typeof value !== "string" || /\s/.test(value.trim())) return false;
+  try {
+    const url = new URL(value.trim());
+    return ["http:", "https:"].includes(url.protocol) &&
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) &&
+      !url.username && !url.password && !url.search && !url.hash &&
+      url.pathname.replace(/\/+$/, "") === "/v1";
+  } catch { return false; }
+}
+
 export function normalizeLlm(raw) {
   const l = raw && typeof raw === "object" ? raw : {};
+  const local = isLocalAiUrl(l.baseUrl);
   return {
-    baseUrl: isHttpUrl(l.baseUrl) ? l.baseUrl.trim().replace(/\/+$/, "") : DEFAULT_LLM.baseUrl,
+    enabled: l.enabled !== false && (local || l.baseUrl === undefined),
+    baseUrl: local ? l.baseUrl.trim().replace(/\/+$/, "") : DEFAULT_LLM.baseUrl,
     model: typeof l.model === "string" && l.model.trim() ? l.model.trim() : DEFAULT_LLM.model,
-    apiKey: typeof l.apiKey === "string" ? l.apiKey.trim() : "",
+    apiKey: local && typeof l.apiKey === "string" ? l.apiKey.trim() : "",
     timeoutSec: clampInt(l.timeoutSec, 5, 180, DEFAULT_LLM.timeoutSec)
   };
 }
 
 export function normalizeSettings(raw) {
   const s = raw && typeof raw === "object" ? raw : {};
+  const oldDefaultTimeout = s.version < 4 && [60, 120].includes(s.llm?.timeoutSec);
   return {
     version: DEFAULT_SETTINGS.version,
-    rules: Array.isArray(s.rules) ? normalizeRules(s.rules) : DEFAULT_SETTINGS.rules,
-    llm: normalizeLlm(s.llm),
+    fastMode: typeof s.fastMode === "boolean" ? s.fastMode : DEFAULT_SETTINGS.fastMode,
+    rules: Array.isArray(s.rules) ? normalizeRules(s.rules).filter(rule => rule.action === "block") : DEFAULT_SETTINGS.rules,
+    llm: normalizeLlm(oldDefaultTimeout ? { ...s.llm, timeoutSec: DEFAULT_LLM.timeoutSec } : s.llm),
     studyHomeUrl: isHttpUrl(s.studyHomeUrl) ? s.studyHomeUrl.trim() : DEFAULT_SETTINGS.studyHomeUrl
   };
 }

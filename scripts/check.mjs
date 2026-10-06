@@ -23,7 +23,7 @@ const referenced = [
   manifest.action.default_popup,
   manifest.options_ui.page,
   manifest.background.service_worker,
-  ...manifest.background.scripts,
+  ...(manifest.background.scripts || []),
   ...manifest.content_scripts.flatMap(c => c.js)
 ];
 for (const file of referenced) {

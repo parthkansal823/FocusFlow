@@ -35,7 +35,7 @@ function renderTab(state, verdicts) {
   const type = isYouTubeHost(host) ? "" : siteType(site);
   let label = "";
   let tone = "";
-  if (mark) {
+  if (mark && mark.verdict === "block") {
     label = mark.verdict === "allow" ? "You marked: study" : "You marked: blocked";
     tone = mark.verdict === "allow" ? "ok" : "danger";
   } else if (verdict) {

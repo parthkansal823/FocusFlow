@@ -8,7 +8,7 @@ import { buildModel, offlineVerdict } from "../shared/offline.js";
 import { siteType } from "../shared/policy.js";
 import * as actions from "./actions.js";
 import * as controller from "./controller.js";
-import { askLlm, listModels, warmUp } from "./llm.js";
+import { listModels } from "./llm.js";
 
 const isMainFrame = details =>
   details.frameId === 0 && details.tabId >= 0 && details.documentLifecycle !== "prerender";
@@ -44,11 +44,6 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 
 // --- Storage changes ---------------------------------------------------------
 
-const llmChanged = ({ oldValue, newValue }) => {
-  const pick = s => (s && s.llm ? `${s.llm.baseUrl}|${s.llm.model}` : "");
-  return pick(oldValue) !== pick(newValue);
-};
-
 const siteTypes = sites =>
   JSON.stringify(Object.entries(sites || {}).map(([host, s]) => [host, siteType(s)]).filter(([, t]) => t).sort());
 
@@ -67,8 +62,6 @@ function scheduleReevaluation({ includePending }) {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== "local") return;
   if (KEYS.training in changes) controller.invalidateModel();
-
-  if (KEYS.settings in changes && llmChanged(changes[KEYS.settings])) wakeLlm();
 
   const policyChanged = KEYS.settings in changes || KEYS.overrides in changes;
   const sitesChanged = KEYS.sites in changes;
@@ -96,21 +89,10 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
   await store.set({ [KEYS.settings]: await store.getSettings() });
   await controller.reevaluateAllTabs();
-  wakeLlm();
 });
 
-// Load the model as soon as the browser opens (and when you pick another one),
-// so the first page you visit is judged at full speed. This also wakes a
-// sleeping Hugging Face Space.
-chrome.runtime.onStartup.addListener(() => wakeLlm());
-
-async function wakeLlm() {
-  try {
-    await warmUp((await store.getSettings()).llm);
-  } catch {
-    // not reachable yet; the first real request will report it
-  }
-}
+// Do not load an inference model on install/startup/settings changes. Even
+// optional AI is contacted only for an unclear page or an explicit model test.
 
 // --- Messages ------------------------------------------------------------------
 
@@ -133,8 +115,13 @@ async function testUrl(url) {
   const offline = offlineVerdict(meta, model);
   let llm;
   const started = Date.now();
-  try {
-    llm = { ok: true, ...(await askLlm(meta, ctx.settings.llm)), ms: Date.now() - started };
+  if (!ctx.settings.llm.enabled) {
+    llm = { ok: false, disabled: true, error: "Optional AI is off; the lightweight classifier decides." };
+  } else try {
+    const answer = await controller.judge(meta, decision, ctx, { learn: false });
+    llm = answer?.source === "llm"
+      ? { ok: true, ...answer, ms: Date.now() - started }
+      : { ok: false, error: answer?.llmError || "AI could not verify this page" };
   } catch (error) {
     llm = { ok: false, error: error.message };
   }

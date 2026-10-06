@@ -1,6 +1,6 @@
 {
   "name": "focusflow",
-  "version": "4.0.0",
+  "version": "4.0.2",
   "private": true,
   "description": "Strict study-only browser extension: a local LLM judges each page from its metadata.",
   "type": "module",

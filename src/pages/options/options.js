@@ -1,9 +1,8 @@
 import { rankModel } from "../../background/llm.js";
-import { LLM_PRESETS, LIMITS } from "../../shared/defaults.js";
 import { SITE_EVIDENCE, siteType } from "../../shared/policy.js";
 import { formatPattern, parsePattern } from "../../shared/rules.js";
 import { emptyStats } from "../../shared/stats.js";
-import { KEYS, readAll, saveSettings, set } from "../../shared/store.js";
+import { isLocalAiUrl, KEYS, readAll, saveSettings, set } from "../../shared/store.js";
 import { $, el, llmSummary, send, toast } from "../common.js";
 
 let state = null;
@@ -18,31 +17,27 @@ async function refresh() {
   renderData();
 }
 
-// --- Thinking AI --------------------------------------------------------------
+// --- Optional local AI -------------------------------------------------------
 
 function fillLlmForm() {
   const llm = state.settings.llm;
   $("#baseUrl").value = llm.baseUrl;
   $("#model").value = llm.model;
-  $("#apiKey").value = llm.apiKey;
+  $("#aiEnabled").value = String(llm.enabled);
   $("#timeoutSec").value = llm.timeoutSec;
-  highlightPreset();
+  updateAiFields();
 }
 
-function presetFor(url) {
-  if (/\.hf\.space/i.test(url)) return "hfSpace";
-  if (/localhost|127\.0\.0\.1/i.test(url)) return "ollama";
-  return "custom";
+function updateAiFields() {
+  const disabled = $("#aiEnabled").value !== "true";
+  for (const id of ["baseUrl", "model", "timeoutSec", "detectModels"]) $("#" + id).disabled = disabled;
+  $("#baseUrl").setCustomValidity("");
 }
 
-function highlightPreset() {
-  const current = presetFor($("#baseUrl").value);
-  document.querySelectorAll(".preset").forEach(b => {
-    const active = b.dataset.preset === current;
-    b.classList.toggle("active", active);
-    b.setAttribute("aria-checked", String(active));
-  });
-  $("#helpOllama").open = current === "ollama" && state.llmStatus && state.llmStatus.ok === false;
+function validateLocalUrl() {
+  const input = $("#baseUrl");
+  input.setCustomValidity(isLocalAiUrl(input.value) ? "" : "Use localhost, 127.0.0.1 or [::1], ending in /v1. Hosted AI is not supported.");
+  return input.reportValidity();
 }
 
 function renderLlmState() {
@@ -54,9 +49,10 @@ function renderLlmState() {
 
 function formLlm() {
   return {
+    enabled: $("#aiEnabled").value === "true",
     baseUrl: $("#baseUrl").value.trim(),
     model: $("#model").value.trim(),
-    apiKey: $("#apiKey").value.trim(),
+    apiKey: "",
     timeoutSec: Number($("#timeoutSec").value)
   };
 }
@@ -73,9 +69,9 @@ async function checkConnection(llm) {
   $("#modelOptions").replaceChildren(...["auto", ...models].map(id => el("option", { value: id })));
   const best = models.filter(id => rankModel(id) >= 0).sort((a, b) => rankModel(b) - rankModel(a))[0];
   if (!models.length) {
-    out.textContent = "Connected, but no model is installed. Run: ollama pull qwen3:4b";
+    out.textContent = "Connected, but no model is installed. Run: ollama pull qwen3:1.7b";
   } else if (llm.model === "auto") {
-    out.textContent = `✓ Connected · auto uses the best installed model: ${best || models[0]}`;
+    out.textContent = `✓ Connected · auto uses a smaller compatible model: ${best || models[0]}`;
   } else if (models.some(id => id === llm.model || id.split(":")[0] === llm.model)) {
     out.textContent = `✓ Connected · ${models.length} model${models.length === 1 ? "" : "s"} available`;
   } else {
@@ -84,27 +80,11 @@ async function checkConnection(llm) {
   return models;
 }
 
-const HELP = { ollama: "#helpOllama", hfSpace: "#helpHf", custom: "#helpCustom" };
-
-document.querySelectorAll(".preset").forEach(button =>
-  button.addEventListener("click", () => {
-    const preset = LLM_PRESETS[button.dataset.preset];
-    if (preset) {
-      $("#baseUrl").value = preset.baseUrl;
-      $("#model").value = preset.model;
-    } else {
-      $("#baseUrl").value = "http://";
-      $("#baseUrl").focus();
-    }
-    highlightPreset();
-    document.querySelectorAll(".preset").forEach(b => b.classList.toggle("active", b === button));
-    $(HELP[button.dataset.preset]).open = true;
-  })
-);
-
-$("#baseUrl").addEventListener("input", highlightPreset);
+$("#aiEnabled").addEventListener("change", updateAiFields);
+$("#baseUrl").addEventListener("input", () => $("#baseUrl").setCustomValidity(""));
 
 $("#detectModels").addEventListener("click", async () => {
+  if (!validateLocalUrl()) return;
   const models = await checkConnection(formLlm());
   const current = $("#model").value.trim();
   if (models && models.length && current !== "auto" && !models.includes(current)) $("#model").value = "auto";
@@ -113,9 +93,10 @@ $("#detectModels").addEventListener("click", async () => {
 $("#llmForm").addEventListener("submit", async event => {
   event.preventDefault();
   const llm = formLlm();
-  state.settings = await saveSettings({ llm });
+  if (llm.enabled && !validateLocalUrl()) return;
+  state.settings = await saveSettings({ llm, fastMode: true });
   toast("Saved");
-  await checkConnection(state.settings.llm);
+  $("#llmResult").textContent = llm.enabled ? "Saved. Local AI is used only when needed." : "Saved. Lightweight classifier on; AI off.";
 });
 
 // --- Test a page ---------------------------------------------------------------
@@ -154,7 +135,7 @@ $("#testForm").addEventListener("submit", async event => {
   box.hidden = false;
   box.replaceChildren(el("p", {
     class: "muted",
-    text: "Reading metadata and asking the thinking AI…"
+    text: "Reading public metadata and checking study content…"
   }));
   const button = event.submitter;
   if (button) button.disabled = true;
@@ -166,8 +147,8 @@ $("#testForm").addEventListener("submit", async event => {
     }
     const llm = result.llm;
     const llmCard = llm.ok
-      ? verdictCard("Thinking AI", llm.verdict, `${llm.reason || ""}${llm.site ? ` · site: ${llm.site}` : ""} · ${(llm.ms / 1000).toFixed(1)}s`)
-      : verdictCard("Thinking AI", "", `✗ ${llm.error}`);
+      ? verdictCard("Local AI", llm.verdict, `${llm.reason || ""}${llm.site ? ` · site: ${llm.site}` : ""} · ${(llm.ms / 1000).toFixed(1)}s`)
+      : verdictCard("Local AI", "", `${llm.disabled ? "" : "✗ "}${llm.error}`);
     box.replaceChildren(
       el("div", { class: "verdicts" }, [
         llmCard,
@@ -241,7 +222,7 @@ function renderRules() {
         el("div", { class: "item-main" }, [el("div", { class: "item-title mono", text: rule.pattern })]),
         el("span", {
           class: `chip ${rule.action === "allow" ? "ok" : "danger"}`,
-          text: rule.action === "allow" ? "always allow" : "always block"
+          text: "always block"
         }),
         el("button", {
           class: "icon-btn",
@@ -277,7 +258,7 @@ $("#addRuleForm").addEventListener("submit", async event => {
 // --- Marks ------------------------------------------------------------------------
 
 function renderMarks() {
-  const marks = Object.entries(state.overrides).sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
+  const marks = Object.entries(state.overrides).filter(([, mark]) => mark.verdict === "block").sort((a, b) => (b[1].at || 0) - (a[1].at || 0));
   $("#markEmpty").hidden = marks.length > 0;
   $("#markList").replaceChildren(
     ...marks.map(([key, mark]) =>
@@ -311,7 +292,7 @@ function renderData() {
   const fromYou = state.training.filter(e => e.source === "user").length;
   $("#dataSummary").textContent =
     `${learnedSites} learned sites · ${fromAi} examples from the AI · ${fromYou} from you · ` +
-    `${state.stats.total || 0} pages blocked in total. Study marks: ${LIMITS.studyMarksPerDay} per day.`;
+    `${state.stats.total || 0} pages blocked in total. Hard mode always on; study bypasses disabled.`;
 }
 
 $("#resetLearning").addEventListener("click", async () => {

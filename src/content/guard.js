@@ -9,13 +9,14 @@
   window.__focusFlowGuard = true;
 
   const COVER_DELAY_MS = 300; // instant decisions never show the cover
-  const MAX_HOLD_MS = 200000; // fail open only if the background vanished
+  const RECONNECT_MS = 10_000;
 
   let holding = false;
   let lastVersion = -1;
   let cover = null;
   let coverTimer = null;
-  let holdTimer = null;
+  let reconnectTimer = null;
+  let syncing = false;
   const pausedByUs = new Set();
   let snapshot = { url: location.href, title: "" };
 
@@ -40,12 +41,12 @@
       <style>
         :host { all: initial; }
         .cover { position: fixed; inset: 0; z-index: 2147483647; display: grid; place-items: center;
-          background: #0d1016; color: #eef1f6; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+          background: #111111; color: #f5f5f5; font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
         .box { display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; padding: 24px; }
-        .ring { width: 38px; height: 38px; border-radius: 50%; border: 3px solid #2a303c; border-top-color: #5b8cff;
+        .ring { width: 38px; height: 38px; border-radius: 50%; border: 3px solid #383838; border-top-color: #ffffff;
           animation: spin .9s linear infinite; }
         .title { font-size: 17px; font-weight: 700; }
-        .sub { color: #a3acba; max-width: 340px; }
+        .sub { color: #b3b3b3; max-width: 340px; }
         @keyframes spin { to { transform: rotate(360deg); } }
         @media (prefers-reduced-motion: reduce) { .ring { animation-duration: 3s; } }
       </style>
@@ -53,7 +54,7 @@
         <div class="box">
           <div class="ring"></div>
           <div class="title">FocusFlow is checking this page</div>
-          <div class="sub">The thinking AI is reading its title and description. Study and tech content opens, everything else is blocked.</div>
+          <div class="sub">Checking study content. Hard mode stays on; unverified pages remain blocked.</div>
         </div>
       </div>`;
     document.documentElement.appendChild(cover);
@@ -73,12 +74,12 @@
     document.querySelectorAll("video, audio").forEach(pauseMedia);
     clearTimeout(coverTimer);
     coverTimer = setTimeout(showCover, COVER_DELAY_MS);
-    clearTimeout(holdTimer);
-    holdTimer = setTimeout(release, MAX_HOLD_MS);
+    if (!reconnectTimer) reconnectTimer = setInterval(syncState, RECONNECT_MS);
   }
 
   function release() {
-    clearTimeout(holdTimer);
+    clearInterval(reconnectTimer);
+    reconnectTimer = null;
     hideCover();
     if (!holding) return;
     holding = false;
@@ -91,12 +92,12 @@
 
   function apply(message) {
     if (!message || typeof message.version !== "number" || message.version < lastVersion) return;
+    if (message.url && stripHash(message.url) !== stripHash(location.href)) return;
     lastVersion = message.version;
-    if (message.state === "pending") {
+    if (message.state !== "allowed") {
       hold();
     } else {
       release();
-      scheduleVisible();
     }
   }
 
@@ -186,57 +187,30 @@
     snapshot = { url: location.href, title: document.title };
   });
 
-  // --- Pre-judging ---------------------------------------------------------------
-  // Tell the background which links you'll probably open next, so their verdict
-  // is ready before you click: videos on screen (YouTube) and the hovered link.
-
-  const sent = new Set();
+  // --- YouTube cleanup ---------------------------------------------------------
+  // No hover/scroll link scanning: inference is only for opened pages.
   const isYouTube = /(^|\.)youtube\.com$/.test(location.hostname);
-  let visibleTimer = null;
-  let hoverTimer = null;
-
-  function prefetch(urls, reason) {
-    const fresh = urls.filter(url => {
-      if (sent.has(url) || stripHash(url) === stripHash(location.href) || !/^https?:/.test(url)) return false;
-      if (sent.size > 500) sent.clear();
-      sent.add(url);
-      return true;
-    });
-    if (fresh.length) chrome.runtime.sendMessage({ type: "ff:prefetch", urls: fresh, reason }).catch(() => {});
+  // Hard mode has no toggle: remove the most common YouTube rabbit holes.
+  if (isYouTube) {
+    const cleanYouTube = () => {
+      if (document.documentElement && !document.getElementById("focusflow-hard-style")) {
+        const style = document.createElement("style");
+        style.id = "focusflow-hard-style";
+        style.textContent = `#related, ytd-watch-next-secondary-results-renderer, #comments, ytd-comments,
+          ytd-reel-shelf-renderer, ytd-rich-shelf-renderer[is-shorts], ytd-merch-shelf-renderer,
+          .ytp-ce-element, .ytp-endscreen-content, .ytp-upnext,
+          .ytp-autonav-toggle-button-container, a[href^="/shorts/"] { display: none !important; }`;
+        document.documentElement.appendChild(style);
+      }
+      const autoplay = document.querySelector('.ytp-autonav-toggle-button[aria-checked="true"]');
+      if (autoplay) autoplay.click();
+    };
+    let cleanTimer = null;
+    new MutationObserver(() => {
+      if (!cleanTimer) cleanTimer = setTimeout(() => { cleanTimer = null; cleanYouTube(); }, 250);
+    }).observe(document, { childList: true, subtree: true, attributes: true, attributeFilter: ["aria-checked"] });
+    cleanYouTube();
   }
-
-  function visibleVideoLinks() {
-    const ids = new Set();
-    const urls = [];
-    for (const a of document.querySelectorAll('a[href*="/watch?v="]')) {
-      const rect = a.getBoundingClientRect();
-      if (!rect.width || rect.bottom < 0 || rect.top > window.innerHeight) continue;
-      const id = new URL(a.href).searchParams.get("v");
-      if (!id || ids.has(id)) continue;
-      ids.add(id);
-      urls.push(`https://www.youtube.com/watch?v=${id}`);
-      if (urls.length >= 6) break;
-    }
-    return urls;
-  }
-
-  function scheduleVisible(delay = 800) {
-    if (!isYouTube) return;
-    clearTimeout(visibleTimer);
-    visibleTimer = setTimeout(() => {
-      if (!holding) prefetch(visibleVideoLinks(), "visible");
-    }, delay);
-  }
-
-  document.addEventListener("pointerover", event => {
-    const link = event.target instanceof Element && event.target.closest("a[href]");
-    if (!link || holding) return;
-    clearTimeout(hoverTimer);
-    hoverTimer = setTimeout(() => prefetch([link.href], "hover"), 120);
-  }, { passive: true, capture: true });
-
-  window.addEventListener("scroll", () => scheduleVisible(1000), { passive: true });
-
   // --- Wiring ------------------------------------------------------------------
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -252,8 +226,20 @@
     return false;
   });
 
-  chrome.runtime
-    .sendMessage({ type: "ff:hello" })
-    .then(apply)
-    .catch(() => {}); // extension reloaded or unavailable: do nothing
+  async function syncState() {
+    if (syncing) return;
+    syncing = true;
+    try { apply(await chrome.runtime.sendMessage({ type: "ff:hello" })); }
+    catch { /* Remain covered; a later hello can wake a restarted worker. */ }
+    finally { syncing = false; }
+  }
+
+  // Reconnect after bfcache restores and document activation as well as while
+  // waiting. Never expose an unchecked page just because the worker stopped.
+  window.addEventListener("pageshow", syncState);
+  // A local development server is outside the filter, as in policy.decide().
+  const local = location.hostname === "localhost" || location.hostname.endsWith(".localhost") ||
+    location.hostname === "127.0.0.1" || location.hostname === "[::1]";
+  if (!local) hold();
+  syncState();
 })();

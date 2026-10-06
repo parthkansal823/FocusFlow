@@ -1,4 +1,4 @@
-# FocusFlow judge: a thinking model behind an OpenAI-compatible API.
+# FocusFlow judge: short non-thinking classification behind an OpenAI-compatible API.
 # Runs on a free Hugging Face Space (Docker SDK, CPU basic) or on any Docker host,
 # e.g. an Oracle Cloud Always Free VM.
 #
@@ -24,8 +24,7 @@ EXPOSE 7860
 
 # --parallel 2      a page you open never waits behind a background pre-judgement
 # --cache-reuse     the long, fixed instructions are processed once, not per request
-# --jinja + --reasoning-format deepseek
-#                   Qwen3's chat template; thinking comes back separate from the answer
+# --jinja + --reasoning off: Qwen3's template without a long reasoning trace
 CMD ["--model", "/models/model.gguf", \
      "--alias", "qwen3", \
      "--host", "0.0.0.0", \
@@ -34,4 +33,6 @@ CMD ["--model", "/models/model.gguf", \
      "--parallel", "2", \
      "--cache-reuse", "256", \
      "--jinja", \
-     "--reasoning-format", "deepseek"]
+     "--reasoning", "off", \
+     "--reasoning-budget", "0", \
+     "--no-webui"]

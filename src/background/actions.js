@@ -1,12 +1,11 @@
 // Corrections the user can make. None of them turns blocking off:
-//   - "This is study content"   → allow one exact page/video (5 per day, after a wait)
+//   - "This is study content"   → rejected (hard mode has no bypass)
 //   - "Block this page"          → always block one exact page/video
 //   - forget a learned site      → it will be judged again
 // Every correction also teaches the offline model.
 
-import { LIMITS } from "../shared/defaults.js";
 import { contentKey, isYouTubeHost, normalizeHost, parseUrl } from "../shared/rules.js";
-import { forgetSiteRecord, recordSitePage, studyMarksToday } from "../shared/policy.js";
+import { forgetSiteRecord, recordSitePage } from "../shared/policy.js";
 import * as store from "../shared/store.js";
 import { KEYS } from "../shared/store.js";
 import { forgetVerdict, queueWrite, resetVerdictCache, trimTraining } from "./controller.js";
@@ -35,16 +34,8 @@ async function saveMark(key, mark, label) {
   await forgetVerdict(key);
 }
 
-export async function markStudy({ key, url, title }) {
-  if (!key || !url || contentKey(url) !== key) return { ok: false, error: "Unknown page." };
-  const overrides = await store.get(KEYS.overrides, {});
-  const used = studyMarksToday(overrides);
-  if (used >= LIMITS.studyMarksPerDay) {
-    return { ok: false, error: `You've used all ${LIMITS.studyMarksPerDay} study marks for today.` };
-  }
-  const mark = { verdict: "allow", url, title: String(title || "").slice(0, 200), at: Date.now() };
-  await saveMark(key, mark, "study");
-  return { ok: true, remaining: LIMITS.studyMarksPerDay - used - 1 };
+export async function markStudy() {
+  return { ok: false, error: "Hard mode is always on. Study bypasses are disabled." };
 }
 
 export async function markDistraction({ tabId }) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { tokenize } from "../../src/shared/model.js";
-import { buildModel, metadataText, offlineVerdict } from "../../src/shared/offline.js";
+import { buildModel, fastVerdict, metadataText, offlineVerdict } from "../../src/shared/offline.js";
 import { DISTRACTION_EXAMPLES, STUDY_EXAMPLES } from "../../src/shared/training-data.js";
 
 // Titles that are NOT in the bundled training data.
@@ -84,10 +84,11 @@ test("unknown content is blocked in strict mode", () => {
 test("the offline model learns from corrections and LLM verdicts", () => {
   const title = "Nirvana shatakam chanting for focus";
   const before = offlineVerdict({ title }, buildModel());
-  const learned = Array.from({ length: 3 }, () => ({ text: title, label: "study", source: "user" }));
+  const learned = Array.from({ length: 9 }, () => ({ text: title, label: "study", source: "llm" }));
   const after = offlineVerdict({ title }, buildModel(learned));
   assert.ok(after.pStudy > before.pStudy);
   assert.equal(after.verdict, "allow");
+  assert.equal(offlineVerdict({ title }, buildModel([{ text: title, label: "study", source: "user" }])).pStudy, before.pStudy);
 });
 
 test("metadataText uses rich metadata", () => {
@@ -102,4 +103,14 @@ test("metadataText uses rich metadata", () => {
   assert.match(text, /category Education/);
   assert.match(text, /MIT OpenCourseWare/);
   assert.match(text, /dynamic programming/);
+});
+
+test("fast mode answers clear content but defers unknown and conflicting metadata", () => {
+  const model = buildModel();
+  assert.equal(fastVerdict({ title: "Binary search explained" }, model).verdict, "allow");
+  assert.equal(fastVerdict({ title: "Funny cat videos compilation" }, model).verdict, "block");
+  assert.equal(fastVerdict({ title: "zzqx vvbn" }, model), null);
+  assert.equal(fastVerdict({ title: "Learn more" }, model), null);
+  assert.equal(fastVerdict({ description: "Binary search explained" }, model), null);
+  assert.equal(fastVerdict({ title: "Funny cat videos compilation", description: "Binary search algorithms programming tutorial data structures leetcode system design operating systems" }, model), null);
 });
