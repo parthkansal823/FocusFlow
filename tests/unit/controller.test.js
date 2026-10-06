@@ -44,7 +44,7 @@ test("controller fast path opens study and blocks entertainment without network 
     assert.equal(updated.length, 1);
     assert.match(updated[0].url, /source=local/);
     assert.equal(data.training.length, 0);
-    assert.equal(data.sites["mixed.test"].allowed, undefined, "local guesses cannot teach whole-site trust");
+    assert.equal(data.sites["mixed.test"].allowed, 0, "local guesses cannot teach whole-site trust");
 
     // An old navigation event must never block the new page already in this tab.
     data.settings = { rules: [{ pattern: "old.test", action: "block" }] };

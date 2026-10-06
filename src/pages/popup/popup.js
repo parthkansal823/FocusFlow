@@ -2,18 +2,19 @@ import { siteType } from "../../shared/policy.js";
 import { contentKey, isWebUrl, isYouTubeHost, normalizeHost, parseUrl } from "../../shared/rules.js";
 import { countForDay, lastDays } from "../../shared/stats.js";
 import { get, KEYS, readAll } from "../../shared/store.js";
+import { privateUrl, sanitizeMetadata, storageKey } from "../../shared/privacy.js";
 import { $, el, formatTime, llmSummary, send, sourceLabel, toast } from "../common.js";
 
 let activeTab = null;
 
 async function refresh() {
   const [state, verdicts] = await Promise.all([readAll(), get(KEYS.verdictCache, {})]);
-  renderTab(state, verdicts);
+  await renderTab(state, verdicts);
   renderStats(state);
   renderJudge(state);
 }
 
-function renderTab(state, verdicts) {
+async function renderTab(state, verdicts) {
   const chip = $("#tabChip");
   const button = $("#blockTab");
   chip.hidden = true;
@@ -25,8 +26,9 @@ function renderTab(state, verdicts) {
   }
 
   const host = normalizeHost(parseUrl(activeTab.url).hostname);
-  const key = contentKey(activeTab.url);
-  $("#tabTitle").textContent = activeTab.title || host;
+  const key = await storageKey(contentKey(activeTab.url));
+  const meta = sanitizeMetadata({ title: activeTab.title }, activeTab.url);
+  $("#tabTitle").textContent = meta.privacyProtected ? "Private page — not scanned" : meta.title || host;
   $("#tabHost").textContent = host;
 
   const mark = state.overrides[key];
@@ -51,7 +53,7 @@ function renderTab(state, verdicts) {
     chip.textContent = label;
     chip.title = (verdict && verdict.reason) || (site && site.reason) || "";
   }
-  button.disabled = Boolean(mark && mark.verdict === "block");
+  button.disabled = privateUrl(activeTab.url) || Boolean(mark && mark.verdict === "block");
 }
 
 function renderStats({ stats, history }) {
@@ -82,15 +84,14 @@ function renderStats({ stats, history }) {
   );
 }
 
-function renderJudge({ settings, llmStatus, sites, training }) {
+function renderJudge({ settings, llmStatus, sites }) {
   const summary = llmSummary(settings, llmStatus);
   $("#llmChip").className = `chip ${summary.tone}`;
   $("#llmText").textContent = summary.text;
   $("#llmChip").title = summary.detail;
   const learnedSites = Object.values(sites).filter(s => siteType(s)).length;
-  const examples = training.length;
   $("#learned").textContent =
-    `Learned ${learnedSites} site${learnedSites === 1 ? "" : "s"} and ${examples} example${examples === 1 ? "" : "s"} so far.`;
+    `Learned ${learnedSites} site${learnedSites === 1 ? "" : "s"}. Raw page-text training is disabled.`;
 }
 
 $("#blockTab").addEventListener("click", async () => {

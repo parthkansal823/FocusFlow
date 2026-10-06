@@ -10,6 +10,7 @@
 
   const COVER_DELAY_MS = 300; // instant decisions never show the cover
   const RECONNECT_MS = 10_000;
+  const privacy = globalThis.FocusFlowPrivacy;
 
   let holding = false;
   let lastVersion = -1;
@@ -116,46 +117,27 @@
     return "";
   }
 
-  function jsonLdTypes() {
-    const types = new Set();
-    const visit = node => {
-      if (!node || typeof node !== "object") return;
-      if (Array.isArray(node)) return node.forEach(visit);
-      [].concat(node["@type"] || []).forEach(t => typeof t === "string" && types.add(t));
-      if (node["@graph"]) visit(node["@graph"]);
-    };
-    document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
-      try {
-        visit(JSON.parse(script.textContent));
-      } catch {
-        // ignore broken JSON-LD
-      }
-    });
-    return [...types].slice(0, 5).join(", ");
-  }
-
   function readMeta() {
-    const h1 = document.querySelector("h1");
-    const root = document.querySelector("main, article, [role=main]") || document.body;
-    const snippet = root
-      ? [...root.querySelectorAll("p")]
-        .slice(0, 8)
-        .map(p => clean(p.textContent, 300))
-        .filter(t => t.length > 40)
-        .join(" ")
-      : "";
-    return {
+    if (!privacy || privacy.privateUrl(location.href) || privateDocument()) {
+      return { url: location.href, privacyProtected: true };
+    }
+    const meta = privacy.sanitizeMetadata({
       url: location.href,
       title: clean(document.title, 200),
       description: clean(metaContent("description", "og:description", "twitter:description"), 500),
       siteName: clean(metaContent("og:site_name", "application-name"), 80),
       type: clean(metaContent("og:type"), 40),
       keywords: clean(metaContent("keywords"), 300),
-      h1: h1 ? clean(h1.textContent, 200) : "",
-      jsonLd: jsonLdTypes(),
-      snippet: clean(snippet, 400),
       lang: document.documentElement.lang || ""
-    };
+    });
+    // Raw URL is used ONLY to match the sender's navigation, not for inference/storage.
+    return { ...meta, url: location.href };
+  }
+
+  function privateDocument() {
+    // Examine attributes only: never read form values or editor/message text.
+    return Boolean(document.querySelector('input[type="password"], [contenteditable="true"], [contenteditable=""], input[autocomplete^="cc-"], input[autocomplete="one-time-code"], [data-private], [data-sensitive]')) ||
+      /noindex/i.test(metaContent("robots"));
   }
 
   function waitFor(check, timeoutMs) {
@@ -172,19 +154,21 @@
   }
 
   async function collect(expectedUrl) {
+    if (!privacy || privacy.privateUrl(location.href)) return { url: location.href, privacyProtected: true };
     await waitFor(() => document.readyState !== "loading", 3000);
     if (stripHash(location.href) !== stripHash(expectedUrl)) return { url: location.href };
+    if (privateDocument()) return { url: location.href, privacyProtected: true };
     // After in-page navigation the old title lingers for a moment: wait for the new one.
     if (snapshot.url !== location.href && snapshot.title && document.title === snapshot.title) {
       await waitFor(() => document.title !== snapshot.title, 1500);
     }
     const meta = readMeta();
-    snapshot = { url: location.href, title: document.title };
+    snapshot = { url: location.href, title: meta.privacyProtected ? "" : meta.title || "" };
     return meta;
   }
 
   document.addEventListener("DOMContentLoaded", () => {
-    snapshot = { url: location.href, title: document.title };
+    snapshot = { url: location.href, title: "" };
   });
 
   // --- YouTube cleanup ---------------------------------------------------------

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "FocusFlow - Study Only Shield",
   "short_name": "FocusFlow",
-  "version": "4.0.2",
+  "version": "4.0.3",
   "description": "Strict study filter: a local AI reads each page's metadata and only lets study & tech content open. No off switch.",
   "minimum_chrome_version": "121",
   "icons": {
@@ -34,7 +34,7 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["src/content/guard.js"],
+      "js": ["src/shared/privacy-core.js", "src/content/guard.js"],
       "run_at": "document_start"
     }
   ]

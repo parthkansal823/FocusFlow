@@ -2,34 +2,26 @@
 //   - "This is study content"   → rejected (hard mode has no bypass)
 //   - "Block this page"          → always block one exact page/video
 //   - forget a learned site      → it will be judged again
-// Every correction also teaches the offline model.
+// Marks no longer retain title/text training examples.
 
 import { contentKey, isYouTubeHost, normalizeHost, parseUrl } from "../shared/rules.js";
 import { forgetSiteRecord, recordSitePage } from "../shared/policy.js";
 import * as store from "../shared/store.js";
 import { KEYS } from "../shared/store.js";
-import { forgetVerdict, queueWrite, resetVerdictCache, trimTraining } from "./controller.js";
+import { privateUrl, publicUrl, storageKey } from "../shared/privacy.js";
+import { forgetVerdict, queueWrite, resetVerdictCache } from "./controller.js";
 
-function trainingExample(key, url, title, label) {
-  const parsed = parseUrl(url);
-  const host = parsed ? normalizeHost(parsed.hostname).replace(/\./g, " ") : "";
-  return { key, text: [title, host].filter(Boolean).join(" | "), label, source: "user", at: Date.now() };
-}
-
-async function saveMark(key, mark, label) {
+async function saveMark(key, mark) {
   await queueWrite(async () => {
-    const data = await chrome.storage.local.get([KEYS.overrides, KEYS.training, KEYS.sites]);
+    const data = await chrome.storage.local.get([KEYS.overrides, KEYS.sites]);
     const overrides = data[KEYS.overrides] || {};
     overrides[key] = mark;
-    const training = (data[KEYS.training] || []).filter(e => e.key !== key);
-    training.push(trainingExample(key, mark.url, mark.title, label));
-    // Your mark is evidence about the site too: one study page keeps it from
-    // ever being blocked as a whole.
+    // Distraction marks contribute block evidence; there is no study bypass.
     const sites = data[KEYS.sites] || {};
     const parsed = parseUrl(mark.url);
     const host = parsed ? normalizeHost(parsed.hostname) : "";
     if (host && !isYouTubeHost(host)) sites[host] = recordSitePage(sites[host], { verdict: mark.verdict }, Date.now());
-    await store.set({ [KEYS.overrides]: overrides, [KEYS.training]: trimTraining(training), [KEYS.sites]: sites });
+    await store.set({ [KEYS.overrides]: overrides, [KEYS.sites]: sites });
   });
   await forgetVerdict(key);
 }
@@ -39,16 +31,18 @@ export async function markStudy() {
 }
 
 export async function markDistraction({ tabId }) {
+  await store.ensurePrivacy();
   let tab;
   try {
     tab = await chrome.tabs.get(tabId);
   } catch {
     return { ok: false, error: "That tab is gone." };
   }
-  const key = contentKey(tab.url || "");
+  if (privateUrl(tab.url || "")) return { ok: false, error: "Private pages are already protected; their data is not saved." };
+  const key = await storageKey(contentKey(tab.url || ""));
   if (!key || !/^https?:/i.test(tab.url)) return { ok: false, error: "Only web pages can be blocked." };
-  const title = String(tab.title || "").replace(/\s*-\s*YouTube$/i, "").slice(0, 200);
-  await saveMark(key, { verdict: "block", url: tab.url, title, at: Date.now() }, "distraction");
+  const url = publicUrl(tab.url, { originOnly: true });
+  await saveMark(key, { verdict: "block", url, title: new URL(url).hostname, at: Date.now() });
   return { ok: true };
 }
 

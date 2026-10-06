@@ -4,7 +4,7 @@
 // controller (metadata -> local LLM -> offline model).
 //
 // Order of precedence:
-//   1. hard-mode distraction surfaces            -> block
+//   1. privacy guard / hard-mode surfaces        -> block
 //   2. distraction marks and your block rules     -> block
 //   3. old study marks / allow rules              -> ignored
 //   4. AI-reviewed study site (never YouTube)     -> allow without scanning
@@ -15,12 +15,13 @@ import { contentKey, findRule, isLocalHost, isWebUrl, isYouTubeHost, normalizeHo
 import { localDateKey } from "./stats.js";
 import { hardBlockReason } from "./hard-mode.js";
 import { LIMITS } from "./defaults.js";
+import { privateUrl, PRIVACY_REASON } from "./privacy.js";
 
 /**
  * @param {string} url
  * @param {{settings: object, overrides: object, sites: object}} ctx
  * @returns {{action: "allow", reason: string}
- *         | {action: "block", reason: "hard"|"rule"|"marked"|"site", detail?: string, pattern?: string, key?: string, host?: string}
+ *         | {action: "block", reason: "privacy"|"hard"|"rule"|"marked"|"site", detail?: string, pattern?: string, key?: string, host?: string}
  *         | {action: "check", key: string, kind: "youtube"|"page", host: string}}
  */
 export function decide(url, ctx) {
@@ -32,6 +33,9 @@ export function decide(url, ctx) {
   if (parsed.hostname === "sdx.microsoft.com" && parsed.pathname === "/family/restricted-web") {
     return { action: "allow", reason: "browser-safety" };
   }
+  // Privacy wins even over an AI-trusted domain. Never use sensitive URL values
+  // to infer an educational purpose or allow them via a saved site verdict.
+  if (privateUrl(parsed.href)) return { action: "block", reason: "privacy", detail: PRIVACY_REASON };
   const hardReason = hardBlockReason(parsed);
   if (hardReason) return { action: "block", reason: "hard", detail: hardReason };
 

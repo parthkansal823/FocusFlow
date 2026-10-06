@@ -124,7 +124,7 @@ test("askLlm posts an OpenAI-compatible request", async () => {
   assert.equal(result.verdict, "allow");
   const [call] = fetchImpl.calls;
   assert.equal(call.url, "http://localhost:11434/v1/chat/completions");
-  assert.equal(call.init.headers.Authorization, "Bearer secret");
+  assert.equal(call.init.headers.Authorization, undefined, "Ollama requests never transmit authentication secrets");
   assert.equal(call.init.redirect, "error", "localhost cannot redirect metadata to a remote AI server");
   assert.equal(call.body.model, "qwen3:1.7b");
   assert.equal(call.body.messages[0].role, "system");
@@ -162,6 +162,13 @@ test("listModels understands OpenAI-style model lists", async () => {
   const fetchImpl = fakeFetch(() => ({ json: { data: [{ id: "qwen3:1.7b" }, { id: "llama3.2" }] } }));
   assert.deepEqual(await listModels(llm, { fetchImpl }), ["qwen3:1.7b", "llama3.2"]);
   assert.equal(fetchImpl.calls[0].url, "http://localhost:11434/v1/models");
+});
+
+test("oversized JSON and unterminated SSE responses are rejected rather than buffered indefinitely", async () => {
+  for (const type of ["application/json", "text/event-stream"]) {
+    const fetchImpl = async () => new Response("x".repeat(256001), { headers: { "content-type": type } });
+    await assert.rejects(askLlm(meta, llm, { fetchImpl }), /response is too large/);
+  }
 });
 
 test("direct AI requests reject hosted URLs and cloud models before any fetch", async () => {

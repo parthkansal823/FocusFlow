@@ -288,11 +288,9 @@ function renderMarks() {
 
 function renderData() {
   const learnedSites = Object.values(state.sites).filter(s => siteType(s)).length;
-  const fromAi = state.training.filter(e => e.source === "llm").length;
-  const fromYou = state.training.filter(e => e.source === "user").length;
   $("#dataSummary").textContent =
-    `${learnedSites} learned sites · ${fromAi} examples from the AI · ${fromYou} from you · ` +
-    `${state.stats.total || 0} pages blocked in total. Hard mode always on; study bypasses disabled.`;
+    `${learnedSites} learned sites · ${state.stats.total || 0} pages blocked in total. ` +
+    "Privacy guard on: no raw page-text training, query strings or page titles saved in block history. Hard mode always on.";
 }
 
 $("#resetLearning").addEventListener("click", async () => {

@@ -45,5 +45,5 @@ export function countForDay(stats, now) {
 
 export function appendHistory(history, entry) {
   const list = Array.isArray(history) ? history : [];
-  return [...list, entry].slice(-LIMITS.historyEntries);
+  return [...list, entry].filter(item => item.at >= entry.at - LIMITS.historyTtlMs && item.at <= entry.at).slice(-LIMITS.historyEntries);
 }

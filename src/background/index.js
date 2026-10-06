@@ -9,6 +9,7 @@ import { siteType } from "../shared/policy.js";
 import * as actions from "./actions.js";
 import * as controller from "./controller.js";
 import { listModels } from "./llm.js";
+import { privateUrl, PRIVACY_REASON } from "../shared/privacy.js";
 
 const isMainFrame = details =>
   details.frameId === 0 && details.tabId >= 0 && details.documentLifecycle !== "prerender";
@@ -104,6 +105,7 @@ function isExtensionPage(sender) {
 async function testUrl(url) {
   const parsed = parseUrl(url);
   if (!parsed || !/^https?:$/.test(parsed.protocol)) return { ok: false, error: "Enter a full http(s) URL." };
+  if (privateUrl(url)) return { ok: false, error: PRIVACY_REASON };
   const ctx = await store.readPolicyContext();
   const decision = {
     key: contentKey(parsed),
@@ -111,6 +113,7 @@ async function testUrl(url) {
     host: normalizeHost(parsed.hostname)
   };
   const meta = await controller.gatherMetadata(decision, parsed.href);
+  if (meta.privacyProtected) return { ok: false, error: PRIVACY_REASON };
   const model = buildModel(await store.get(KEYS.training, []));
   const offline = offlineVerdict(meta, model);
   let llm;

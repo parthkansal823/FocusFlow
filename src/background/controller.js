@@ -5,7 +5,7 @@
 //                           └─ check ─▶ page held ("pending", media paused, covered)
 //                                     ─▶ remembered verdict?
 //                                     ─▶ metadata (page DOM + YouTube/site info from the net)
-//                                     ─▶ local AI ──▶ site review + trains offline model
+//                                     ─▶ local AI ──▶ site review + hashed verdict cache
 //                                         └─ unavailable ─▶ offline model (strict: unsure = block)
 //                                     ─▶ allow | block
 //
@@ -13,9 +13,10 @@
 // hand over page metadata when asked.
 
 import { LIMITS } from "../shared/defaults.js";
-import { buildModel, fastVerdict, metadataText, offlineVerdict } from "../shared/offline.js";
+import { buildModel, fastVerdict, offlineVerdict } from "../shared/offline.js";
 import { decide, recordSitePage, siteReview } from "../shared/policy.js";
-import { isWebUrl, isYouTubeHost, normalizeHost, parseUrl, youtubeVideoId } from "../shared/rules.js";
+import { contentKey, isWebUrl, isYouTubeHost, normalizeHost, parseUrl, youtubeVideoId } from "../shared/rules.js";
+import { privateUrl, publicUrl, sanitizeMetadata, protectedMeta, storageKey, PRIVACY_REASON } from "../shared/privacy.js";
 import { appendHistory, recordBlock } from "../shared/stats.js";
 import * as store from "../shared/store.js";
 import { KEYS } from "../shared/store.js";
@@ -76,17 +77,18 @@ export function queueWrite(task) {
 }
 
 function llmFingerprint(llm) {
-  return ["hard-v4.0.2-ai-site-review", llm.enabled ? "ai" : "lightweight", llm.baseUrl, llm.model].join("|");
+  return ["hard-v4.0.3-private-metadata", llm.enabled ? "ai" : "lightweight", llm.baseUrl, llm.model].join("|");
 }
 
 async function cachedVerdict(key, llm) {
-  const entry = (await getVerdictCache())[key];
+  const entry = (await getVerdictCache())[await storageKey(key)];
   if (!entry || entry.fp !== llmFingerprint(llm) || Date.now() - entry.at > LIMITS.verdictCacheTtlMs) return null;
   return entry;
 }
 
 export function forgetVerdict(key) {
   return queueWrite(async () => {
+    key = await storageKey(key);
     const cache = await store.get(KEYS.verdictCache, {});
     delete cache[key];
     cachePromise = Promise.resolve(cache);
@@ -135,7 +137,7 @@ export function evaluateTab(tabId, url, { force = false } = {}) {
   const entry = { url, state: "checking", version: ++stateVersion };
   tabs.set(tabId, entry);
   entry.done = run(tabId, entry).catch(error => {
-    console.error("[FocusFlow] evaluation failed", url, error);
+    console.error("[FocusFlow] evaluation failed"); // never log raw URLs/errors from private pages
     // Strict mode: if our own pipeline breaks, block rather than let it through.
     return blockTab(tabId, entry, { kind: "content", source: "error", reason: "Could not verify this page" });
   });
@@ -172,6 +174,7 @@ export function stateForContent(tabId, url) {
 // Evaluation
 
 const BLOCK_REASONS = {
+  privacy: () => PRIVACY_REASON,
   hard: d => d.detail,
   marked: () => "You marked this page as a distraction",
   rule: d => `${d.pattern} is on your block list`,
@@ -186,6 +189,14 @@ async function run(tabId, entry) {
   if (!isCurrent(tabId, entry)) return;
 
   const decision = decide(entry.url, ctx);
+  if (decision.reason !== "privacy" && decision.reason !== "hard" && decision.reason !== "not-web" && decision.reason !== "local" && decision.reason !== "browser-safety") {
+    const mark = ctx.overrides[await storageKey(contentKey(entry.url))];
+    if (!isCurrent(tabId, entry)) return;
+    if (mark?.verdict === "block") {
+      await blockTab(tabId, entry, { kind: "marked", source: "marked", reason: BLOCK_REASONS.marked() });
+      return;
+    }
+  }
   if (decision.action === "allow") {
     setState(tabId, entry, "allowed");
     return;
@@ -193,7 +204,7 @@ async function run(tabId, entry) {
   if (decision.action === "block") {
     await blockTab(tabId, entry, {
       kind: decision.reason,
-      source: decision.reason === "site" ? "site" : decision.reason === "hard" ? "hard" : "rule",
+      source: ["site", "hard", "privacy"].includes(decision.reason) ? decision.reason : "rule",
       reason: BLOCK_REASONS[decision.reason](decision, ctx)
     });
     return;
@@ -216,6 +227,7 @@ async function run(tabId, entry) {
     // No AI, network metadata, speculative prefetch, or self-training.
     const page = await metadataFromTab(tabId, entry.url, stillWanted);
     if (!stillWanted()) return;
+    if (page?.privacyProtected) return blockTab(tabId, entry, { kind: "privacy", source: "privacy", reason: PRIVACY_REASON });
     const meta = { ...(page || {}), url: entry.url, host: decision.host, kind: decision.kind };
     const model = await getModel();
     verdict = fastVerdict(meta, model) || { ...offlineVerdict(meta, model), title: meta.title || "" };
@@ -225,6 +237,7 @@ async function run(tabId, entry) {
     // first allowed page goes to AI once to review its purpose, not a fixed list.
     const page = await metadataFromTab(tabId, entry.url, stillWanted);
     if (page && stillWanted()) {
+      if (page.privacyProtected) return blockTab(tabId, entry, { kind: "privacy", source: "privacy", reason: PRIVACY_REASON });
       livePage = page;
       const local = fastVerdict({ ...page, url: entry.url, host: decision.host, kind: decision.kind }, await getModel());
       if (local?.verdict === "block" || !needsSiteReview) verdict = local;
@@ -240,7 +253,7 @@ async function run(tabId, entry) {
 
   if (verdict.verdict === "block") {
     await blockTab(tabId, entry, {
-      kind: "content",
+      kind: verdict.source === "privacy" ? "privacy" : "content",
       key: decision.key,
       title: verdict.title,
       reason: verdict.reason,
@@ -264,32 +277,39 @@ export async function prefetch() {
  * "test a page"), from the network.
  */
 export async function gatherMetadata(decision, url, { tabId = null, stillWanted = () => true, pageMeta: collectedPage = null } = {}) {
+  if (privateUrl(url)) return protectedMeta(url);
   const base = { url, host: decision.host, kind: decision.kind };
   const ctx = await getContext();
   if (!ctx.settings.llm.enabled) {
     // A manual Settings test may fetch just the requested page. Browsing reads
     // its existing DOM, with no additional homepage or video requests.
     const page = tabId === null ? await pageFromNet(url) : await metadataFromTab(tabId, url, stillWanted);
-    return { ...base, ...(page || {}), url };
+    return sanitizeMetadata({ ...base, ...(page || {}) }, url);
   }
+
+  // Read the DOM privacy marker before auxiliary website requests, including
+  // when the fast classifier is disabled. A marker must never trigger fallback.
+  const live = collectedPage || (tabId === null ? null : await metadataFromTab(tabId, url, stillWanted));
+  if (live?.privacyProtected) return protectedMeta(url);
 
   if (decision.kind === "youtube") {
     const fromNet = await youtubeFromNet(youtubeVideoId(url));
-    if (fromNet) return { ...base, ...fromNet };
+    if (fromNet) return sanitizeMetadata({ ...base, ...fromNet }, url);
   }
 
   // The site profile helps but must not slow the answer down: if it isn't known
   // yet, wait briefly and let it finish in the background for next time.
   const profile = isYouTubeHost(decision.host) ? null : siteProfile(decision.host);
   const [page, site] = await Promise.all([
-    collectedPage || (tabId === null ? pageFromNet(url) : metadataFromTab(tabId, url, stillWanted)),
+    live || (tabId === null ? pageFromNet(url) : null),
     profile && Promise.race([profile, sleep(LIMITS.siteProfileWaitMs).then(() => null)])
   ]);
   let pageMeta = page;
   if (!pageMeta && tabId !== null && stillWanted()) pageMeta = await pageFromNet(url);
+  if (pageMeta?.privacyProtected) return protectedMeta(url);
   const meta = { ...base, ...(pageMeta || {}), url, site };
   if (decision.kind === "youtube") meta.title = String(meta.title || "").replace(/\s*-\s*YouTube$/i, "");
-  return meta;
+  return sanitizeMetadata(meta, url);
 }
 
 // Ask the content script for the page's metadata; it answers once the DOM is ready.
@@ -302,7 +322,7 @@ async function metadataFromTab(tabId, url, stillWanted) {
         sleep(Math.max(0, deadline - Date.now())).then(() => null)
       ]);
       // A different URL means the old document answered; the new one will be ready soon.
-      if (meta && stripHash(meta.url) === stripHash(url)) return meta;
+      if (meta && stripHash(meta.url) === stripHash(url)) return sanitizeMetadata(meta, url);
     } catch {
       // content script not injected yet
     }
@@ -403,9 +423,11 @@ async function verdictFor(decision, ctx, { getMeta, wanted = () => true }) {
 
 /**
  * Ask local AI; if it can't be reached, the offline model decides.
- * Learns from every LLM answer unless `learn` is false (Settings → Test a page).
+ * Remembers safe decisions unless `learn` is false (Settings → Test a page).
  */
 export async function judge(meta, decision, ctx, { job = null, learn = true } = {}) {
+  meta = sanitizeMetadata(meta);
+  if (meta.privacyProtected) return { verdict: "block", source: "privacy", reason: PRIVACY_REASON, title: "" };
   const llm = ctx.settings.llm;
   if (!llm.enabled) return { ...offlineVerdict(meta, await getModel()), title: meta.title || "" };
   const task = job || { wanted: () => true };
@@ -418,7 +440,7 @@ export async function judge(meta, decision, ctx, { job = null, learn = true } = 
     const verdict = {
       verdict: answer.verdict,
       source: "llm",
-      reason: answer.reason || (answer.verdict === "allow" ? "Study/tech content" : "Not study/tech content"),
+      reason: answer.verdict === "allow" ? "Study/tech content" : "Not verified as study/tech content",
       site: answer.site || "",
       wholeSiteStudy: answer.wholeSiteStudy === true,
       title: meta.title || ""
@@ -441,16 +463,17 @@ export async function judge(meta, decision, ctx, { job = null, learn = true } = 
 
 function learnFrom(meta, decision, verdict, llm) {
   const now = Date.now();
-  const cached = { ...verdict, fp: llmFingerprint(llm), at: now };
+  const { title: _title, ...safeVerdict } = verdict;
+  const cached = { ...safeVerdict, fp: llmFingerprint(llm), at: now };
   // Visible to the next queued LLM request right away, before storage catches up.
-  cachePromise = getVerdictCache().then(cache => ({ ...cache, [decision.key]: cached }));
+  cachePromise = Promise.all([getVerdictCache(), storageKey(decision.key)]).then(([cache, key]) => ({ ...cache, [key]: cached }));
 
   queueWrite(async () => {
-    const data = await chrome.storage.local.get([KEYS.verdictCache, KEYS.training, KEYS.sites]);
+    const data = await chrome.storage.local.get([KEYS.verdictCache, KEYS.sites]);
 
     // 1. Remember the verdict for this exact page/video.
     const cache = data[KEYS.verdictCache] || {};
-    cache[decision.key] = cached;
+    cache[await storageKey(decision.key)] = cached;
     const keys = Object.keys(cache);
     if (keys.length > LIMITS.verdictCacheEntries) {
       keys.sort((a, b) => cache[a].at - cache[b].at)
@@ -459,15 +482,8 @@ function learnFrom(meta, decision, verdict, llm) {
     }
     cachePromise = Promise.resolve(cache);
 
-    // 2. Teach the offline model.
-    const training = (data[KEYS.training] || []).filter(e => e.key !== decision.key);
-    training.push({
-      key: decision.key,
-      text: metadataText(meta),
-      label: verdict.verdict === "allow" ? "study" : "distraction",
-      source: "llm",
-      at: now
-    });
+    // Do not retain raw metadata as training examples. The bundled model and
+    // hashed verdict/site cache still provide the fast path.
 
     // 3. Collect evidence about the whole site (see siteType() for when it counts).
     const sites = data[KEYS.sites] || {};
@@ -489,7 +505,6 @@ function learnFrom(meta, decision, verdict, llm) {
 
     await store.set({
       [KEYS.verdictCache]: cache,
-      [KEYS.training]: trimTraining(training),
       [KEYS.sites]: pruneSites(sites)
     });
   });
@@ -504,6 +519,7 @@ export function trimTraining(training) {
 }
 
 function reportLlmStatus(status) {
+  if (status.error) status = { ...status, error: "Local AI unavailable. Check the Ollama server/model and extension-origin settings." };
   const signature = JSON.stringify(status);
   if (signature === lastLlmStatus) return;
   lastLlmStatus = signature;
@@ -514,13 +530,13 @@ function reportLlmStatus(status) {
 // Blocking
 
 export function blockedPageUrl(info) {
+  const isPrivate = info.kind === "privacy" || privateUrl(info.url);
   const params = new URLSearchParams({
-    url: info.url,
+    url: publicUrl(info.url, { originOnly: isPrivate }),
     kind: info.kind || "content",
     reason: info.reason || "",
     source: info.source || "",
-    title: info.title || "",
-    key: info.key || ""
+    title: isPrivate ? "" : sanitizeMetadata({ title: info.title }, info.url).title || ""
   });
   return `${chrome.runtime.getURL("src/pages/blocked/blocked.html")}?${params}`;
 }
@@ -546,13 +562,15 @@ async function blockTab(tabId, entry, info) {
   const parsed = parseUrl(entry.url);
   queueWrite(async () => {
     const data = await chrome.storage.local.get([KEYS.stats, KEYS.history]);
+    // A privacy block stores a count only: no private URL, host, title or reason.
+    const isPrivate = info.kind === "privacy" || privateUrl(entry.url);
     await store.set({
       [KEYS.stats]: recordBlock(data[KEYS.stats], now),
-      [KEYS.history]: appendHistory(data[KEYS.history], {
+      [KEYS.history]: isPrivate ? data[KEYS.history] || [] : appendHistory(data[KEYS.history], {
         at: now,
-        url: entry.url,
+        url: publicUrl(entry.url, { originOnly: true }),
         host: parsed ? normalizeHost(parsed.hostname) : "",
-        title: info.title || "",
+        title: parsed ? normalizeHost(parsed.hostname) : "",
         kind: info.kind,
         reason: info.reason || "",
         source: info.source || ""

@@ -55,7 +55,8 @@ export const SOURCE_LABELS = {
   site: "Learned site",
   rule: "Your rule",
   marked: "Your mark",
-  error: "Unverified"
+  error: "Unverified",
+  privacy: "Privacy protection"
 };
 
 // Label for a blocked-page / history entry.

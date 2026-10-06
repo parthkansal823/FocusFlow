@@ -1,7 +1,7 @@
 # FocusFlow — hard-mode study shield
 
-An Edge/Chromium extension that allows educational, technical and work-related
-pages while blocking distractions. The interface uses only black, white and grey
+An Edge/Chromium extension that allows public educational/technical pages while
+blocking distractions and detected private content. The interface uses only black, white and grey
 and keeps the popup statistics and three-panel blocked screen.
 
 ## Hard mode only
@@ -26,7 +26,7 @@ as Microsoft Family Safety remain unchanged.
 
 ## Fast decisions
 
-1. Hard-block paths and your block rules decide first. There is **no manual
+1. Privacy guards, hard-block paths and your block rules decide first. There is **no manual
    educational allow-list**. On a site's first allowed visit, local AI checks
    its homepage and the current page together. For new reviews, only an explicit dedicated-study
    verdict backed by homepage metadata grants whole-site trust. It lasts 7 days;
@@ -116,13 +116,48 @@ AI checks; a browser extension cannot bundle and silently start a native server.
 
 ## Privacy
 
-- Unclear page titles, descriptions and URLs go to your configured loopback AI
+- Version 4.0.3 no longer extracts paragraphs, message bodies, editor contents,
+  form values, headings or JSON-LD from live pages. It classifies allow-listed
+  page titles and head metadata only; arbitrary new metadata fields are discarded.
+- A deterministic privacy deny guard protects known personal services,
+  account/authentication/mail/chat/payment/private routes, credentialed URLs,
+  sensitive query parameters and obvious identifiers. Password/payment/OTP forms,
+  editable documents and noindex pages return a protected marker before reading
+  metadata. Detected private pages are blocked without AI, training or history;
+  only the aggregate block count changes. These are security deny rules, not an
+  educational allow-list. They also override saved educational-site trust when
+  the URL is sensitive. Work tools/private LMS pages may be blocked deliberately.
+- Unclear public page titles, descriptions and sanitized URLs go to the loopback AI
   endpoint only (`localhost`, `127.0.0.1` or `[::1]`). Hosted endpoints are not
-  supported, and AI requests cannot follow redirects to another server.
+  supported, AI requests cannot follow redirects, and API keys are not stored
+  or sent. Obvious email addresses, payment-number patterns and credential text
+  in metadata cause a privacy block. URLs embedded in text are removed. Query
+  strings and fragments are removed from AI URLs (except public YouTube video IDs).
 - For richer context, FocusFlow fetches public YouTube watch pages and site home
-  pages without browser cookies. Clear local-first decisions skip these lookups.
-- Learned verdicts, training examples, block history and settings stay in the
-  browser's local storage. There is no analytics service or bundled API key.
+  pages without browser cookies. Auxiliary requests require HTTPS, reject literal
+  IP/intranet hosts and nonstandard ports, do not follow redirects and have bounded
+  reads/timeouts. Clear local-first decisions skip these lookups. Website operators
+  still receive these ordinary requests and can observe the source IP; this is not
+  a fully offline extension or a guarantee against all DNS/private-host aliases.
+- Verdict/mark identities are SHA-256 hashes, keeping different searches distinct
+  without storing their raw queries. These hashes are NOT encryption or a promise
+  of anonymity. Saved verdicts contain no page titles or raw page-text training.
+  Block history contains domain-level entries only (no paths, queries or titles),
+  capped at 100 entries/7 days; page verdicts expire after 14 days. Expired entries
+  are pruned when the extension storage context starts and history is updated.
+  Settings, marks, learned site profiles and counts stay in browser-local storage,
+  not cloud sync. Direct storage access is restricted to trusted extension contexts;
+  content scripts do not have access. There is no analytics/developer collection endpoint.
+- Upgrading clears old generated history, raw training, page caches and homepage
+  profiles that could retain sensitive text. Safe distraction marks are migrated
+  to hashed identities; private marks are discarded. Settings, block rules, counts
+  and site-vote evidence remain. Settings offers learning/history reset controls.
+- Privacy detection is conservative but heuristic: unusual private applications
+  or personal details in supposedly public metadata may not be recognized. Do not
+  claim that sensitive data access is impossible, or that local storage is encrypted.
+  Malware, other privileged software or someone with device/profile access can
+  access browser files or the local AI service. Store disclosures must still cover
+  website content and browsing history and match a hosted privacy policy.
 - Host permissions are needed to cover/classify websites, fetch public metadata
   for unclear pages and contact the local AI endpoint.
 
@@ -140,7 +175,7 @@ npm run test:e2e
 npm run package
 ```
 
-`npm run package` produces `dist/focusflow-4.0.2.zip` containing only the manifest,
+`npm run package` produces `dist/focusflow-4.0.3.zip` containing only the manifest,
 icons and extension source. This is a package for submission, not confirmation
 of Microsoft store approval. Store listing, screenshots and a public privacy
 policy must be supplied separately.

@@ -13,6 +13,7 @@ import { dirname, join, resolve } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
+import { publicUrl } from "../../src/shared/privacy.js";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const tmp = mkdtempSync(join(tmpdir(), "focusflow-e2e-"));
@@ -125,6 +126,9 @@ const SITES = {
     }),
     "/posts/fast-study": page({ title: "Binary search explained", description: "Binary search algorithms tutorial." }),
     "/posts/fast-fun": page({ title: "Funny cat videos compilation", description: "Funny cat videos and comedy compilation." }),
+    "/posts/metadata-only": page({ title: "Binary search privacy fixture", description: "Binary search algorithms tutorial.", h1: "PRIVATE_HEADING_MARKER", body: '<p>PRIVATE_BODY_MARKER person@example.com credit card 4111111111111111</p>' }),
+    "/posts/protected-form": page({ title: "Binary search private form", description: "Binary search algorithms tutorial.", body: '<input type="password" value="PRIVATE_PASSWORD_MARKER"><p>PRIVATE_MESSAGE_MARKER</p>' }),
+    "/posts/protected-editor": page({ title: "Binary search private editor", body: '<div contenteditable="true">PRIVATE_EDITOR_MARKER</div>' }),
     "/spa.js": "document.getElementById('go').onclick = () => { history.pushState({}, '', '/posts/celebrity-gossip'); document.title = 'Celebrity gossip roundup'; };"
   },
   "fun.test": {
@@ -231,7 +235,7 @@ async function visit(tab, url) {
 
 // Wait until `tab` shows the blocked page *for this url* (it may already show another one).
 async function waitForBlocked(tab, url, timeout = 15000) {
-  const needle = `url=${encodeURIComponent(url)}&`;
+  const needle = `url=${encodeURIComponent(publicUrl(url))}&`;
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
     if (tab.url().includes("blocked.html") && tab.url().includes(needle)) {
@@ -245,6 +249,11 @@ async function waitForBlocked(tab, url, timeout = 15000) {
 }
 
 const storage = key => extPage.evaluate(async key => (await chrome.storage.local.get(key))[key], key);
+async function waitForAiCount(count) {
+  const deadline = Date.now() + 15000;
+  while (llmRequests.length < count && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+  assert.ok(llmRequests.length >= count, "the requested page reached the local AI");
+}
 const safetyNotice = tab => {
   const url = new URL(tab.url());
   return url.hostname === "sdx.microsoft.com" && url.pathname === "/family/restricted-web";
@@ -425,8 +434,9 @@ test("a settings change during a slow check still judges the real page", async (
   await tab.goto("https://blog.test/posts/binary-search?edition=2&slow=1");
   await tab.waitForTimeout(3000);
   assert.equal(tab.url(), "https://blog.test/posts/binary-search?edition=2&slow=1");
-  const asked = llmRequests.slice(before).filter(r => r.prompt.includes("edition=2"));
+  const asked = llmRequests.slice(before).filter(r => r.prompt.includes("Binary search explained"));
   assert.ok(asked.length >= 1);
+  assert.ok(asked.every(r => !r.prompt.includes("edition=2") && !r.prompt.includes("slow=1")), "query values do not reach AI");
   assert.ok(asked.every(r => /Page title: Binary search explained/.test(r.prompt)), "never asked without the page's metadata");
   await extPage.evaluate(async () => {
     const { settings } = await chrome.storage.local.get("settings");
@@ -445,6 +455,7 @@ test("unused visible videos do not trigger background AI checks", async t => {
   const before = llmRequests.length;
   await tab.click("#v3");
   await tab.waitForURL(/studyvid003/);
+  await waitForAiCount(before + 1);
   await tab.waitForSelector("focusflow-cover", { state: "detached", timeout: 15000 });
   assert.match(tab.url(), /watch\?v=studyvid003/);
   assert.equal(llmRequests.length, before + 1, "AI judges the lecture only after it is opened");
@@ -579,12 +590,14 @@ test("a streamed AI answer survives the MV3 idle window", async t => {
   await setLlm({ timeoutSec: 50 });
   streamDelay = 32_000;
   const tab = await context.newPage();
+  const before = llmRequests.length;
   t.after(async () => { streamDelay = 0; await setLlm({ timeoutSec: 20 }); await tab.close(); });
   await tab.goto("https://blog.test/posts/binary-search?long-stream=1", { waitUntil: "commit" });
   await tab.waitForSelector("focusflow-cover", { state: "attached" });
   await tab.waitForSelector("focusflow-cover", { state: "detached", timeout: 45_000 });
   assert.equal(tab.url(), "https://blog.test/posts/binary-search?long-stream=1");
-  assert.ok(llmRequests.some(r => r.prompt.includes("long-stream=1")));
+  assert.ok(llmRequests.slice(before).some(r => r.prompt.includes("Binary search explained")));
+  assert.ok(llmRequests.slice(before).every(r => !r.prompt.includes("long-stream=1")));
 });
 
 test("hard mode blocks Shorts and home feeds immediately with no AI", async t => {
@@ -600,6 +613,55 @@ test("hard mode blocks Shorts and home feeds immediately with no AI", async t =>
     t.diagnostic(`Hard-block navigation: ${Date.now() - started}ms`);
   }
   assert.equal(llmRequests.length, before);
+});
+
+test("privacy guard blocks private URLs/forms/editors without AI or retaining private data", async t => {
+  const tab = await context.newPage();
+  t.after(() => tab.close());
+  const before = llmRequests.length;
+  const historyBefore = (await storage("history")).length;
+  for (const url of ["https://blog.test/inbox?token=PRIVATE_TOKEN_MARKER", "https://blog.test/posts/protected-form", "https://blog.test/posts/protected-editor"]) {
+    await visit(tab, url);
+    await waitForBlocked(tab, "https://blog.test/");
+    assert.equal(await tab.textContent("#sourceChip"), "Privacy protection");
+    assert.ok(!tab.url().includes("PRIVATE_"));
+  }
+  assert.equal(llmRequests.length, before);
+  assert.equal((await storage("history")).length, historyBefore, "private pages create a count only");
+  const data = await extPage.evaluate(() => chrome.storage.local.get(null));
+  assert.ok(!JSON.stringify(data).includes("PRIVATE_"));
+  assert.deepEqual(data.training, []);
+  assert.ok(Object.keys(data.verdictCache).every(key => /^sha256:[a-f0-9]{64}$/.test(key)));
+  assert.ok(data.history.every(item => item.url === new URL(item.url).origin + "/" && item.title === item.host));
+});
+
+test("body-only personal text does not reach AI, storage or the classification UI", async t => {
+  const tab = await context.newPage();
+  t.after(() => tab.close());
+  const before = llmRequests.length;
+  await visit(tab, "https://blog.test/posts/metadata-only?private-search-word=original");
+  await waitForAiCount(before + 1);
+  await tab.waitForSelector("focusflow-cover", { state: "detached", timeout: 15000 });
+  const requests = llmRequests.slice(before);
+  assert.equal(requests.length, 1);
+  assert.ok(requests.every(r => !/PRIVATE_|person@example|4111111111111111|private-search-word|original/.test(r.prompt)));
+  const data = await extPage.evaluate(() => chrome.storage.local.get(null));
+  assert.ok(!/PRIVATE_|person@example|4111111111111111|private-search-word|original/.test(JSON.stringify(data)));
+});
+
+test("hashed exact-page block marks still override AI-trusted sites", async t => {
+  const tab = await context.newPage();
+  t.after(() => tab.close());
+  await visit(tab, "https://school.test/module-2?lesson=2");
+  await tab.waitForSelector("focusflow-cover", { state: "detached" });
+  const tabId = await extPage.evaluate(async url => (await chrome.tabs.query({})).find(tab => tab.url === url).id, tab.url());
+  const result = await extPage.evaluate(tabId => chrome.runtime.sendMessage({ type: "ff:mark-distraction", tabId }), tabId);
+  assert.equal(result.ok, true);
+  await waitForBlocked(tab, "https://school.test/module-2");
+  const overrides = await storage("overrides");
+  assert.ok(Object.keys(overrides).every(key => /^sha256:[a-f0-9]{64}$/.test(key)));
+  assert.ok(!JSON.stringify(overrides).includes("lesson=2"));
+  assert.equal(await tab.textContent("#sourceChip"), "Your mark");
 });
 
 test("black-white UI renders in light, dark and narrow layouts", async t => {

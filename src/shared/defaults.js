@@ -30,6 +30,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
 
 export const LIMITS = {
   historyEntries: 100,
+  historyTtlMs: 7 * 24 * 60 * 60 * 1000,
   statsDays: 30,
   trainingExamples: 1000,
   learnedSites: 1000,
